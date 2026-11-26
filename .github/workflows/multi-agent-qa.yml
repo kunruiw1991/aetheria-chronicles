@@ -1,0 +1,67 @@
+name: Multi-Agent QA (Claude + GPT)
+
+on:
+  workflow_dispatch:
+    inputs:
+      claude_model:
+        description: 'Anthropic Claude model ID'
+        required: false
+        default: 'claude-opus-4-1'
+      gpt_model:
+        description: 'OpenAI GPT model ID'
+        required: false
+        default: 'gpt-5'
+  pull_request:
+    branches: [main]
+
+jobs:
+  automated-tests-and-cross-model-qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Playwright & Chromium
+        run: |
+          pip install playwright
+          playwright install chromium --with-deps
+
+      - name: Run Unit + E2E 100% V8 Coverage Tests
+        run: |
+          set -o pipefail
+          {
+            echo "=== NODE UNIT COVERAGE ==="
+            node --test --experimental-test-coverage tests/unit.test.js
+            echo ""
+            echo "=== CHROMIUM E2E V8 COVERAGE ==="
+            python3 tests/e2e_coverage.py
+          } | tee test_output.log
+
+      - name: Run Independent Claude & GPT QA Agents
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CLAUDE_MODEL: ${{ inputs.claude_model || 'claude-opus-4-1' }}
+          GPT_MODEL: ${{ inputs.gpt_model || 'gpt-5' }}
+        run: |
+          python3 scripts/multi_agent_qa.py --test-log test_output.log --out-dir qa-reports
+
+      - name: Upload Independent QA Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multi-agent-qa-reports
+          path: |
+            qa-reports/
+            test_output.log
