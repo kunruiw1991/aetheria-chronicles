@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#131c2e">
+<title>星境奇旅：艾瑟瑞亚大陆 | Aetheria Chronicles RPG</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<canvas id="world" aria-label="Aetheria Chronicles World"></canvas>
+
+<!-- HUD -->
+<div id="hud">
+  <div>
+    <div id="topbar">
+      <button id="partnerCard" class="partner-card" aria-label="Active Partner">
+        <img id="pcImg" alt="">
+        <span class="pc-txt">
+          <span><b id="pcName">Partner</b><span id="pcLv" class="pc-lv">Lv.5</span></span>
+          <span class="pc-hp"><span class="bar"><i id="pcHp"></i></span><small id="pcHpTxt"></small></span>
+        </span>
+      </button>
+      <div id="stats">
+        <span class="chip">🪙 <b id="gold">0</b></span>
+        <span class="chip">🔵 <b id="orbs">0</b></span>
+        <span class="chip">🌈 <b id="superOrbs">0</b></span>
+        <span class="chip">👑 <b id="masterOrbs">0</b></span>
+        <div id="toolBelt"></div>
+      </div>
+      <div id="sysBtns">
+        <button id="langBtn" class="icon-btn">EN</button>
+        <button id="muteBtn" class="icon-btn">🔊</button>
+        <button id="menuBtn" class="icon-btn">⚙️</button>
+      </div>
+    </div>
+    <div class="hud-mid">
+      <div id="chapterBanner">🌿 第 1 章 · 翡翠平原</div>
+      <div id="compassBar" class="hidden">🧭</div>
+    </div>
+  </div>
+
+  <div id="toasts"></div>
+
+  <div id="controls">
+    <div id="dpad" aria-label="Direction Pad">
+      <span class="arr up">▲</span><span class="arr down">▼</span>
+      <span class="arr left">◄</span><span class="arr right">►</span>
+      <span class="hub"></span>
+    </div>
+    <div id="menuRow">
+      <button id="mapBtn" class="menu-btn">🗺️ <span id="mapLbl">大地图</span></button>
+      <button id="dexBtn" class="menu-btn">📖 <span id="dexLbl">图鉴</span> <b id="dexCount">1/25</b></button>
+      <button id="bagBtn" class="menu-btn">🎒 <span id="bagLbl">背包/工具</span></button>
+      <button id="shopBtn" class="menu-btn shop-hl">🎬 <span id="shopLbl">激励宝库</span></button>
+    </div>
+    <div id="abPad">
+      <button id="btnB" class="pad-btn b">B<small id="btnBLabel">疾跑</small></button>
+      <button id="btnA" class="pad-btn a">A<small id="btnALabel">互动</small></button>
+    </div>
+  </div>
+</div>
+
+<!-- Dialog -->
+<div id="dialog" class="hidden" role="dialog">
+  <div class="dlg-face" id="dlgFace">🗣️</div>
+  <div class="dlg-body">
+    <div class="dlg-name" id="dlgName"></div>
+    <div class="dlg-text" id="dlgText"></div>
+  </div>
+  <div class="dlg-more">▶</div>
+</div>
+
+<!-- Battle Overlay -->
+<div id="battle" class="hidden">
+  <div class="b-stage">
+    <canvas id="battleCanvas"></canvas>
+    <div class="b-card b-wild">
+      <div class="b-name"><span id="bwName">Critter</span><span class="b-lv" id="bwLv">Lv.5</span><span class="b-badge" id="bwBadge"></span></div>
+      <div class="hpbar"><i id="bwHp"></i></div>
+      <div class="b-sub"><span id="bwHpTxt"></span></div>
+      <div class="catchbar"><i id="bwCatch"></i><span id="bwCatchTxt">🎯</span></div>
+    </div>
+    <div class="b-card b-mine">
+      <div class="b-name"><span id="bmName">Partner</span><span class="b-lv" id="bmLv">Lv.5</span></div>
+      <div class="hpbar"><i id="bmHp"></i></div>
+      <div class="b-sub"><span id="bmHpTxt"></span></div>
+      <div class="expbar"><i id="bmExp"></i></div>
+    </div>
+  </div>
+  <div class="b-panel">
+    <div class="b-msg" id="bMsg"></div>
+    <div class="b-actions" id="bActions">
+      <button class="bbtn b-attack" data-act="attack"><b id="bAttackLabel">⚡ 技能攻击</b><small id="bMoveName"></small></button>
+      <button class="bbtn b-catch" data-act="catch"><b id="bCatchLabel">🔵 投掷星灵球</b><small id="bCatchInfo"></small></button>
+      <button class="bbtn b-feed" data-act="feed"><b id="bFeedLabel">🍓 喂食灵果</b><small id="bFeedInfo"></small></button>
+      <button class="bbtn b-run" data-act="switch"><b id="bSwitchLabel">🔄 换宠 / 逃跑</b><small id="bSwitchInfo"></small></button>
+    </div>
+    <div class="b-sub-menu hidden" id="bSub"></div>
+  </div>
+</div>
+
+<!-- Modal Overlay -->
+<div id="modal" class="hidden">
+  <div class="modal-panel" role="dialog">
+    <div class="modal-head">
+      <h2 id="modalTitle"></h2>
+      <button id="modalClose" class="close-btn" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<!-- Title Screen -->
+<div id="title">
+  <div class="title-card">
+    <button id="titleLangBtn" class="icon-btn title-lang">🌐 EN</button>
+    <h1 id="titleMain">星境奇旅：艾瑟瑞亚大陆</h1>
+    <h2 id="titleSub">经典奇幻多章节冒险 RPG</h2>
+    <button id="continueBtn" class="big-btn green hidden" style="margin-bottom:10px;width:100%;max-width:340px;"></button>
+    <p class="title-pick" id="titlePick">选择你的第一位原创灵宠伙伴！</p>
+    <div id="starters" class="starters"></div>
+    <p class="title-hint" id="titleHint"></p>
+  </div>
+</div>
+
+<!-- Capture Celebration -->
+<div id="celebrate" class="hidden">
+  <div class="cele-card">
+    <div class="cele-title" id="celeTitle">✨ 成功收服！ ✨</div>
+    <img id="celeImg" alt="">
+    <div class="cele-name" id="celeName"></div>
+    <p class="cele-desc" id="celeDesc"></p>
+    <div class="cele-btns">
+      <button class="big-btn" id="celeOk">太棒了！</button>
+      <button class="big-btn green" id="celePartner">🐾 设为出战</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/platform.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/data.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/world.js"></script>
+<script src="js/art.js"></script>
+<script src="js/battle.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>
