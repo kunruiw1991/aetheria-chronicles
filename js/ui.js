@@ -78,27 +78,11 @@ const UI = (() => {
 
   /* ---------------- Bundle Ownership & Cross-Credited Ad Progress ---------------- */
   function getEffectiveAdProgress(prod, st) {
-    if (!prod || prod.repeatable) return 0;
-    const prog = (st && st.adProgress) || {};
-    let total = prog[prod.id] || 0;
-    if (Array.isArray(prod.creditFrom)) {
-      prod.creditFrom.forEach(srcId => {
-        total += (prog[srcId] || 0);
-      });
-    }
-    return Math.min(prod.adCost || 1, total);
+    return (typeof GameCore !== 'undefined' ? GameCore : globalThis.GameCore).getEffectiveAdProgress(prod, st);
   }
 
   function isProductOwned(p, st) {
-    if (!p || p.repeatable) return false;
-    if (p.isBundle) {
-      return Array.isArray(st.claimedBundles) && st.claimedBundles.includes(p.id);
-    }
-    const g = p.grants || {};
-    const chOk = !g.chapters || g.chapters.every(cid => st.unlockedChapters.includes(cid));
-    const heroOk = !g.heroes || g.heroes.every(hid => st.unlockedHeroes.includes(hid));
-    const toolOk = !g.tools || g.tools.every(tid => st.tools.includes(tid));
-    return chOk && heroOk && toolOk;
+    return (typeof GameCore !== 'undefined' ? GameCore : globalThis.GameCore).isProductOwned(p, st);
   }
 
   function adBtnLabel(prod, st) {

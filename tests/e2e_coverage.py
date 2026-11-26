@@ -29,16 +29,20 @@ EXPECTED_MODULES = [
     "js/data.js",
     "js/audio.js",
     "js/world.js",
+    "js/core.js",
     "js/art.js",
     "js/battle.js",
     "js/ui.js",
     "js/game.js",
 ]
 
-# Documented, enforced overall coverage thresholds (measured honestly from real playtest)
-MIN_LINE_PCT = 78.0
+# Tightened, enforced overall coverage thresholds (aligned with real playtest coverage).
+# Note: V8 Profiler.startPreciseCoverage(detailed=True) emits sub-ranges ONLY where
+# inner block count differs from the parent function (omitting taken uniform-count
+# branches), making V8 sub-range branch % strictly more conservative than AST branch %.
+MIN_LINE_PCT = 90.0
 MIN_BRANCH_PCT = 55.0
-MIN_FUNC_PCT = 72.0
+MIN_FUNC_PCT = 84.0
 
 
 def build_utf16_to_py_map(src: str):
@@ -485,6 +489,51 @@ def run_playtest():
             page.click("#dexBtn"); page.wait_for_selector(".dex-grid", state="visible"); page.click("#modalClose")
             page.click("#partnerCard"); page.wait_for_selector(".crest-bar", state="visible"); page.click("#modalClose")
             page.click("#bagBtn"); page.wait_for_selector(".bag-stats", state="visible"); page.click("#modalClose")
+
+            # Real Gold Economy: buy a Supply & buy/equip Tidecaller Hero
+            page.click("#shopBtn")
+            page.wait_for_selector("[data-tab='items']", state="visible")
+            page.click("[data-tab='items']")
+            orbs_before = page.evaluate("Game.getState().items.orbs")
+            page.click("[data-buy-supply='orbs']")
+            page.wait_for_function(f"Game.getState().items.orbs === {orbs_before + 3}")
+            page.click("[data-tab='heroes']")
+            page.evaluate("Game.getState().gold = Math.max(Game.getState().gold, 300); Game.saveAndSync();")
+            page.click("[data-buy-hero-gold='tidecaller']")
+            page.wait_for_function("Game.getState().heroId === 'tidecaller'")
+            page.click("#modalClose")
+
+            # Real Treasure Chest interaction + NPC dialog 220ms Space debounce
+            page.evaluate("""() => {
+              World.setActiveMap('overworld');
+              const ow = World.getOverworld();
+              const ch = ow.chests.find(c => c.chapter === 1);
+              const st = Game.getState();
+              st.x = ch.x; st.y = ch.y + 1;
+              Game.startGame(st);
+            }""")
+            page.keyboard.press("ArrowUp")
+            page.keyboard.press("Space")
+            page.wait_for_function("Game.getState().openedChests.length >= 1")
+
+            page.evaluate("""() => {
+              const ow = World.getOverworld();
+              const npc = ow.npcs[0];
+              const st = Game.getState();
+              st.x = npc.x; st.y = npc.y + 1;
+              Game.startGame(st);
+            }""")
+            page.keyboard.press("ArrowUp")
+            page.keyboard.press("Space")
+            page.wait_for_selector("#dialog:not(.hidden)", state="visible")
+            # Immediate Space within 220ms MUST NOT dismiss dialog!
+            page.keyboard.press("Space")
+            assert not page.evaluate("document.getElementById('dialog').classList.contains('hidden')")
+            page.wait_for_timeout(260)
+            page.keyboard.press("Space")
+            page.wait_for_function("document.getElementById('dialog').classList.contains('hidden')")
+
+            # Settings two-step reset without window.confirm
             page.click("#menuBtn"); page.wait_for_selector("#setResetBtn", state="visible")
             page.click("#setResetBtn")
             page.wait_for_selector("#setResetConfirmBtn", state="visible")
@@ -528,6 +577,9 @@ def run_playtest():
               })();
             """)
             wx_page = wx_ctx.new_page()
+            wx_cdp = wx_ctx.new_cdp_session(wx_page)
+            wx_cdp.send("Profiler.enable")
+            wx_cdp.send("Profiler.startPreciseCoverage", {"callCount": True, "detailed": True})
             wx_page.on("pageerror", lambda err: errors.append(f"WX_PAGEERROR: {err}"))
             wx_page.goto(base_url, wait_until="networkidle")
             wx_page.click("[data-starter='sproutling']")
@@ -554,6 +606,8 @@ def run_playtest():
             wx_page.evaluate("Array.from(window.__wxCloseSet).forEach(fn => fn({ isEnded: true }))")
             wx_page.wait_for_function("Game.getState().adProgress.ch4_pack === 1")
             assert wx_page.evaluate("Game.getState().adProgress.ch4_pack") == 1
+            all_cov_entries.extend(wx_cdp.send("Profiler.takePreciseCoverage")["result"])
+            wx_cdp.send("Profiler.stopPreciseCoverage")
             wx_ctx.close()
 
             # =====================================================================

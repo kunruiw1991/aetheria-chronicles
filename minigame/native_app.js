@@ -15,8 +15,8 @@ const I18N = require('../js/i18n');
 const GameData = require('../js/data');
 const AudioFX = require('../js/audio');
 const World = require('../js/world');
+const GameCore = require('../js/core');
 const Art = require('../js/art');
-const BattleCore = require('../js/battle');
 
 const NativeApp = (() => {
   const D = GameData;
@@ -57,7 +57,7 @@ const NativeApp = (() => {
   let toasts = []; // [{ text, expiresAt }]
 
   // Native Canvas Battle State
-  let bState = null; // { wild, isBoss, chapterId, busy, menuOpen, subMenu, fedCount, shieldActive, victoryTriggered, msgSpec }
+  let bState = null; // { wild, isBoss, chapterId, busy, menuOpen, subMenu, fedCount, shieldActive, victoryTriggered, msgText }
   const battleTimers = new Set();
 
   // Hit-tested interactive regions rebuilt every frame
@@ -83,162 +83,9 @@ const NativeApp = (() => {
     return id;
   }
 
-  function defaultState(starterId) {
-    const cr = D.CRITTER_BY_ID[starterId] || D.CRITTERS[0];
-    const lv = 5;
-    const maxHp = cr.hp + lv * 6;
-    return {
-      version: 2,
-      heroId: 'ranger',
-      unlockedHeroes: ['ranger'],
-      unlockedChapters: [1, 2, 3],
-      crests: [],
-      tools: ['boots'],
-      gold: 80,
-      items: { orbs: 8, superOrbs: 2, masterOrbs: 0, treats: 5 },
-      party: [{ id: cr.id, lv, hp: maxHp, maxHp, exp: 0 }],
-      activePartnerIdx: 0,
-      caughtIds: [cr.id],
-      openedChests: [],
-      claimedNpcs: [],
-      defeatedBosses: [],
-      claimedBundles: [],
-      adProgress: {},
-      adViewsTotal: 0,
-      mapId: 'overworld',
-      x: 34, y: 92,
-      owX: 34, owY: 92,
-    };
-  }
-
-  function clampInt(n, min, max, fallback) {
-    const v = Number(n);
-    if (!Number.isFinite(v)) return fallback;
-    return Math.max(min, Math.min(max, Math.round(v)));
-  }
-
-  function sanitizeSave(raw) {
-    const base = defaultState('sproutling');
-    if (!raw || typeof raw !== 'object') return base;
-    const validCh = new Set(D.CHAPTERS.map(c => c.id));
-    const validH = new Set(D.HEROES.map(h => h.id));
-    const validT = new Set(D.TOOLS.map(t => t.id));
-    const validC = new Set(D.CRITTERS.map(c => c.id));
-    const validB = new Set(D.PRODUCTS.filter(p => p.isBundle).map(p => p.id));
-
-    const uniq = (arr, set) => {
-      if (!Array.isArray(arr)) return [];
-      const out = [];
-      arr.forEach(v => { if ((!set || set.has(v)) && !out.includes(v)) out.push(v); });
-      return out;
-    };
-
-    const unlockedChapters = uniq(raw.unlockedChapters, validCh);
-    [1, 2, 3].forEach(c => { if (!unlockedChapters.includes(c)) unlockedChapters.push(c); });
-    const unlockedHeroes = uniq(raw.unlockedHeroes, validH);
-    if (!unlockedHeroes.includes('ranger')) unlockedHeroes.unshift('ranger');
-    const heroId = unlockedHeroes.includes(raw.heroId) ? raw.heroId : 'ranger';
-    const tools = uniq(raw.tools, validT);
-    if (!tools.includes('boots')) tools.unshift('boots');
-    const crests = uniq(raw.crests, validCh);
-    const defeatedBosses = uniq((Array.isArray(raw.defeatedBosses) ? raw.defeatedBosses : []).concat(crests), validCh);
-    const claimedBundles = uniq(raw.claimedBundles, validB);
-    const caughtIds = uniq(raw.caughtIds, validC);
-
-    const party = [];
-    if (Array.isArray(raw.party)) {
-      raw.party.slice(0, 25).forEach(p => {
-        if (!p || !validC.has(p.id)) return;
-        const lv = clampInt(p.lv, 1, 50, 5);
-        const cr = D.CRITTER_BY_ID[p.id];
-        const maxHp = Math.max(1, clampInt(p.maxHp, 1, 9999, cr.hp + lv * 6));
-        const hp = clampInt(p.hp, 0, maxHp, maxHp);
-        party.push({ id: p.id, lv, hp, maxHp, exp: clampInt(p.exp, 0, 99999, 0) });
-        if (!caughtIds.includes(p.id)) caughtIds.push(p.id);
-      });
-    }
-    if (!party.length) {
-      party.push(base.party[0]);
-      if (!caughtIds.includes(base.party[0].id)) caughtIds.push(base.party[0].id);
-    }
-    if (party.every(p => p.hp <= 0)) party[0].hp = party[0].maxHp;
-
-    const rawItems = (raw.items && typeof raw.items === 'object') ? raw.items : {};
-    const adProgress = {};
-    if (raw.adProgress && typeof raw.adProgress === 'object') {
-      Object.keys(raw.adProgress).forEach(k => {
-        if (D.PRODUCT_BY_ID[k]) adProgress[k] = clampInt(raw.adProgress[k], 0, 20, 0);
-      });
-    }
-
-    const sanitized = {
-      version: 2,
-      heroId,
-      unlockedHeroes,
-      unlockedChapters,
-      crests,
-      tools,
-      gold: clampInt(raw.gold, 0, 999999, 80),
-      items: {
-        orbs: clampInt(rawItems.orbs, 0, 999, 8),
-        superOrbs: clampInt(rawItems.superOrbs, 0, 999, 2),
-        masterOrbs: clampInt(rawItems.masterOrbs, 0, 999, 0),
-        treats: clampInt(rawItems.treats, 0, 999, 5),
-      },
-      party,
-      activePartnerIdx: clampInt(raw.activePartnerIdx, 0, party.length - 1, 0),
-      caughtIds,
-      openedChests: uniq(Array.isArray(raw.openedChests) ? raw.openedChests.filter(x => typeof x === 'string') : []),
-      claimedNpcs: uniq(Array.isArray(raw.claimedNpcs) ? raw.claimedNpcs.filter(x => typeof x === 'string') : []),
-      defeatedBosses,
-      claimedBundles,
-      adProgress,
-      adViewsTotal: clampInt(raw.adViewsTotal, 0, 99999, 0),
-      mapId: typeof raw.mapId === 'string' ? raw.mapId : 'overworld',
-      x: clampInt(raw.x, 0, D.MAP_W - 1, 34),
-      y: clampInt(raw.y, 0, D.MAP_H - 1, 92),
-      owX: clampInt(raw.owX, 0, D.MAP_W - 1, 34),
-      owY: clampInt(raw.owY, 0, D.MAP_H - 1, 92),
-    };
-
-    const ch1 = D.getChapter(1);
-    const safeX = ch1.healSpot.x;
-    const safeY = ch1.healSpot.y + 1;
-    const ow = World.getOverworld();
-    World.setActiveMap('overworld');
-    if (!sanitized.unlockedChapters.includes(World.getZ(ow, sanitized.owX, sanitized.owY)) ||
-        !World.isWalkable(sanitized.owX, sanitized.owY, sanitized).ok) {
-      sanitized.owX = safeX;
-      sanitized.owY = safeY;
-    }
-    if (sanitized.mapId !== 'overworld') {
-      const dun = World.getDungeon(sanitized.mapId);
-      if (!dun || !sanitized.unlockedChapters.includes(dun.chapterId)) {
-        sanitized.mapId = 'overworld';
-        sanitized.x = safeX;
-        sanitized.y = safeY;
-      }
-    } else if (!sanitized.unlockedChapters.includes(World.getZ(ow, sanitized.x, sanitized.y)) ||
-               !World.isWalkable(sanitized.x, sanitized.y, sanitized).ok) {
-      sanitized.x = safeX;
-      sanitized.y = safeY;
-    }
-    return sanitized;
-  }
-
-  function syncPartyStats() {
-    if (!state || !state.party) return;
-    const hero = D.HERO_BY_ID[state.heroId];
-    const hpMult = (hero && hero.perk && hero.perk.hpMult) ? hero.perk.hpMult : 1;
-    state.party.forEach(p => {
-      const base = D.CRITTER_BY_ID[p.id] || D.CRITTERS[0];
-      const newMax = Math.round((base.hp + p.lv * 6) * hpMult);
-      const oldMax = p.maxHp || newMax;
-      const ratio = oldMax > 0 ? (p.hp / oldMax) : 1;
-      p.maxHp = newMax;
-      p.hp = p.hp <= 0 ? 0 : Math.max(1, Math.min(newMax, Math.round(ratio * newMax)));
-    });
-  }
+  function defaultState(starterId) { return GameCore.defaultState(starterId); }
+  function sanitizeSave(raw) { return GameCore.sanitizeSave(raw); }
+  function syncPartyStats() { GameCore.syncPartyStats(state); }
 
   function toast(text) {
     toasts.push({ text, expiresAt: nowMs() + 2600 });
@@ -255,48 +102,9 @@ const NativeApp = (() => {
     return Platform.writeSave(state);
   }
 
-  function getEffectiveAdProgress(prod) {
-    if (!prod || prod.repeatable) return 0;
-    const prog = (state && state.adProgress) || {};
-    let total = prog[prod.id] || 0;
-    if (Array.isArray(prod.creditFrom)) {
-      prod.creditFrom.forEach(src => { total += (prog[src] || 0); });
-    }
-    return Math.min(prod.adCost || 1, total);
-  }
-
-  function isProductOwned(p) {
-    if (!p || p.repeatable) return false;
-    if (p.isBundle) return Array.isArray(state.claimedBundles) && state.claimedBundles.includes(p.id);
-    const g = p.grants || {};
-    const chOk = !g.chapters || g.chapters.every(cid => state.unlockedChapters.includes(cid));
-    const heroOk = !g.heroes || g.heroes.every(hid => state.unlockedHeroes.includes(hid));
-    const toolOk = !g.tools || g.tools.every(tid => state.tools.includes(tid));
-    return chOk && heroOk && toolOk;
-  }
-
-  function applyProductGrants(prod) {
-    const g = prod.grants || {};
-    if (g.chapters) g.chapters.forEach(cid => { if (!state.unlockedChapters.includes(cid)) state.unlockedChapters.push(cid); });
-    if (g.heroes) {
-      g.heroes.forEach(hid => {
-        if (!state.unlockedHeroes.includes(hid)) state.unlockedHeroes.push(hid);
-        state.heroId = hid;
-      });
-      syncPartyStats();
-    }
-    if (g.tools) g.tools.forEach(tid => { if (!state.tools.includes(tid)) state.tools.push(tid); });
-    if (g.items) {
-      Object.keys(g.items).forEach(k => {
-        if (k === 'gold') state.gold += g.items[k];
-        else state.items[k] = (state.items[k] || 0) + g.items[k];
-      });
-    }
-    if (prod.isBundle) {
-      state.claimedBundles = state.claimedBundles || [];
-      if (!state.claimedBundles.includes(prod.id)) state.claimedBundles.push(prod.id);
-    }
-  }
+  function getEffectiveAdProgress(prod) { return GameCore.getEffectiveAdProgress(prod, state); }
+  function isProductOwned(p) { return GameCore.isProductOwned(p, state); }
+  function applyProductGrants(prod) { GameCore.applyProductGrants(prod, state); }
 
   function triggerAdUnlock(prod) {
     return Platform.showRewardedAd(
@@ -555,13 +363,12 @@ const NativeApp = (() => {
   function startBattle(critterId, lv, isBoss, chId) {
     clearBattleTimers();
     player.moving = false;
-    const st = BattleCore.calcStats(critterId, lv, false, state);
-    const bossHpMult = isBoss ? 1.15 : 1.0;
+    const chapterId = chId || currentChapterId;
     const hero = D.HERO_BY_ID[state.heroId];
     bState = {
-      wild: { id: critterId, lv, maxHp: Math.round(st.maxHp * bossHpMult), hp: Math.round(st.maxHp * bossHpMult), atk: st.atk, spd: st.spd },
+      wild: GameCore.createWildUnit(critterId, lv, isBoss, chapterId),
       isBoss: !!isBoss,
-      chapterId: chId || currentChapterId,
+      chapterId,
       busy: false,
       menuOpen: false,
       subMenu: null,
@@ -578,13 +385,7 @@ const NativeApp = (() => {
   }
 
   function nativeCatchChance(orbMult) {
-    const base = D.CRITTER_BY_ID[bState.wild.id].catchBase;
-    const hpBonus = (1 - Math.max(0, bState.wild.hp / bState.wild.maxHp)) * 0.42;
-    const feedBonus = Math.min(0.45, bState.fedCount * 0.25);
-    const hero = D.HERO_BY_ID[state.heroId];
-    const heroBonus = (hero && hero.perk && hero.perk.catchBonus) ? hero.perk.catchBonus : 0;
-    const toolBonus = state.tools.includes('prismstaff') ? 0.25 : 0;
-    return Math.max(0.08, Math.min(0.98, (base + hpBonus + feedBonus + heroBonus + toolBonus) * (orbMult || 1)));
+    return GameCore.calcCatchChance(bState.wild, bState.fedCount, state, orbMult);
   }
 
   function battleAction(act) {
@@ -594,7 +395,7 @@ const NativeApp = (() => {
       bState.busy = true;
       const mine = getActiveMine();
       const mCr = D.CRITTER_BY_ID[mine.id];
-      const { dmg, mult } = BattleCore.calcPlayerDamage(mine, bState.wild, state);
+      const { dmg, mult } = GameCore.calcPlayerDamage(mine, bState.wild, state);
       bState.wild.hp = Math.max(0, bState.wild.hp - dmg);
       bState.msgText = I18N.t('battleUsedSkill', { a: I18N.pick(mCr.name), skill: I18N.pick(mCr.skill), dmg }) +
         (mult > 1.15 ? I18N.t('battleSuperEffective') : (mult < 0.9 ? I18N.t('battleNotEffective') : ''));
@@ -647,7 +448,7 @@ const NativeApp = (() => {
     if (!bState) return;
     const mine = getActiveMine();
     const wCr = D.CRITTER_BY_ID[bState.wild.id];
-    const { dmg } = BattleCore.calcEnemyDamage(bState.wild, mine, bState.shieldActive);
+    const { dmg } = GameCore.calcEnemyDamage(bState.wild, mine, bState.shieldActive);
     if (bState.shieldActive) bState.shieldActive = false;
     mine.hp = Math.max(0, mine.hp - dmg);
     bState.msgText = I18N.t('battleUsedSkill', { a: I18N.pick(wCr.name), skill: I18N.pick(wCr.skill), dmg });
@@ -673,24 +474,18 @@ const NativeApp = (() => {
     bState.busy = true;
     bState.menuOpen = false;
     bState.subMenu = null;
-    const alreadyDefeated = bState.isBoss && (state.defeatedBosses.includes(bState.chapterId) || state.crests.includes(bState.chapterId));
-    const hero = D.HERO_BY_ID[state.heroId];
-    const expMult = (hero && hero.perk && hero.perk.expMult) ? hero.perk.expMult : 1;
-    let goldMult = (hero && hero.perk && hero.perk.goldMult) ? hero.perk.goldMult : 1;
-    if (state.tools.includes('magnet')) goldMult *= 1.35;
-    const expGain = alreadyDefeated ? 0 : Math.round((16 + bState.wild.lv * 6) * (bState.isBoss ? 2.5 : 1) * expMult);
-    const goldGain = alreadyDefeated ? 0 : Math.round((12 + bState.wild.lv * 4) * (bState.isBoss ? 3.5 : 1) * goldMult);
+    const { expGain, goldGain, rematch } = GameCore.calcVictoryRewards(bState.wild, bState.isBoss, bState.chapterId, state);
     state.gold += goldGain;
     const mine = getActiveMine();
     mine.exp += expGain;
     while (mine.exp >= mine.lv * 30 && mine.lv < 50) {
       mine.exp -= mine.lv * 30;
       mine.lv++;
-      const nst = BattleCore.calcStats(mine.id, mine.lv, true, state);
+      const nst = GameCore.calcStats(mine.id, mine.lv, true, state);
       mine.maxHp = nst.maxHp;
       mine.hp = nst.maxHp;
     }
-    bState.msgText = alreadyDefeated ? I18N.t('battleWinRematch') : I18N.t('battleWin', { exp: expGain, gold: goldGain });
+    bState.msgText = rematch ? I18N.t('battleWinRematch') : I18N.t('battleWin', { exp: expGain, gold: goldGain });
     schedBattle(() => endNativeBattle(caught ? 'caught' : 'win'), 650);
   }
 
@@ -713,7 +508,7 @@ const NativeApp = (() => {
       if (!state.caughtIds.includes(snap.wild.id)) state.caughtIds.push(snap.wild.id);
       const ex = state.party.find(p => p.id === snap.wild.id);
       if (!ex) {
-        const st = BattleCore.calcStats(snap.wild.id, snap.wild.lv, true, state);
+        const st = GameCore.calcStats(snap.wild.id, snap.wild.lv, true, state);
         state.party.push({ id: snap.wild.id, lv: snap.wild.lv, hp: st.maxHp, maxHp: st.maxHp, exp: 0 });
       }
       toast(I18N.t('battleCaught', { name: I18N.pick(D.CRITTER_BY_ID[snap.wild.id].name) }));

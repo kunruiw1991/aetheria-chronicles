@@ -47,55 +47,22 @@ const Battle = (() => {
     pendingTimers.clear();
   }
 
+  const getCore = () => (typeof GameCore !== 'undefined' ? GameCore : globalThis.GameCore);
+
   function levelGapMult(atkLv, defLv) {
-    const diff = (atkLv || 1) - (defLv || 1);
-    return Math.max(0.78, Math.min(1.25, 1 + diff * 0.03));
+    return getCore().levelGapMult(atkLv, defLv);
   }
 
   function calcStats(critterId, lv, isPlayerTeam, stateOverride) {
-    const D = getD();
-    const stObj = stateOverride || state;
-    const base = D.CRITTER_BY_ID[critterId] || D.CRITTERS[0];
-    let hpMult = 1, atkMult = 1;
-    if (isPlayerTeam && stObj) {
-      const hero = D.HERO_BY_ID[stObj.heroId];
-      if (hero && hero.perk) {
-        if (hero.perk.hpMult) hpMult *= hero.perk.hpMult;
-        if (hero.perk.atkMult) atkMult *= hero.perk.atkMult;
-      }
-    }
-    const maxHp = Math.round((base.hp + lv * 6) * hpMult);
-    const atk = Math.round((base.atk + lv * 2.15) * atkMult);
-    const spd = Math.round(base.spd + lv * 1.3);
-    return { maxHp, atk, spd };
+    return getCore().calcStats(critterId, lv, isPlayerTeam, stateOverride || state);
   }
 
   function calcPlayerDamage(mine, wildObj, stObj, rng) {
-    const D = getD();
-    const mCr = D.CRITTER_BY_ID[mine.id] || D.CRITTERS[0];
-    const wCr = D.CRITTER_BY_ID[wildObj.id] || D.CRITTERS[0];
-    const mst = calcStats(mine.id, mine.lv, true, stObj);
-    let mult = D.typeMultiplier(mCr.elem, wCr.elem);
-    const hero = stObj ? D.HERO_BY_ID[stObj.heroId] : null;
-    if (hero && hero.perk && hero.perk.elemBonus && hero.perk.elemBonus.includes(mCr.elem)) {
-      mult *= hero.perk.elemMult;
-    }
-    const gap = levelGapMult(mine.lv, wildObj.lv);
-    const roll = 0.90 + (typeof rng === 'function' ? rng() : Math.random()) * 0.25;
-    const dmg = Math.max(4, Math.round(mst.atk * mult * gap * roll));
-    return { dmg, mult };
+    return getCore().calcPlayerDamage(mine, wildObj, stObj, rng);
   }
 
   function calcEnemyDamage(wildObj, mine, shielded, rng) {
-    const D = getD();
-    const mCr = D.CRITTER_BY_ID[mine.id] || D.CRITTERS[0];
-    const wCr = D.CRITTER_BY_ID[wildObj.id] || D.CRITTERS[0];
-    const mult = D.typeMultiplier(wCr.elem, mCr.elem);
-    const gap = levelGapMult(wildObj.lv, mine.lv);
-    const roll = 0.72 + (typeof rng === 'function' ? rng() : Math.random()) * 0.20;
-    let dmg = Math.max(3, Math.round(wildObj.atk * mult * gap * roll));
-    if (shielded) dmg = Math.max(1, Math.round(dmg * 0.45));
-    return { dmg, mult };
+    return getCore().calcEnemyDamage(wildObj, mine, shielded, rng);
   }
 
   function getActiveMine() {
@@ -111,16 +78,7 @@ const Battle = (() => {
   }
 
   function getCatchChance(orbMult) {
-    const D = getD();
-    const base = D.CRITTER_BY_ID[wild.id].catchBase;
-    const hpRatio = Math.max(0, wild.hp / wild.maxHp);
-    const hpBonus = (1 - hpRatio) * 0.42;
-    const feedBonus = Math.min(0.45, fedCount * 0.25);
-    const hero = D.HERO_BY_ID[state.heroId];
-    const heroBonus = (hero && hero.perk && hero.perk.catchBonus) ? hero.perk.catchBonus : 0;
-    const toolBonus = state.tools.includes('prismstaff') ? 0.25 : 0;
-    const raw = (base + hpBonus + feedBonus + heroBonus + toolBonus) * (orbMult || 1);
-    return Math.max(0.08, Math.min(0.98, raw));
+    return getCore().calcCatchChance(wild, fedCount, state, orbMult);
   }
 
   function closeSubmenu() {
@@ -189,16 +147,7 @@ const Battle = (() => {
     const hero = D.HERO_BY_ID[state.heroId];
     shieldActive = !!(hero && hero.perk && hero.perk.startShield);
 
-    const st = calcStats(critterId, lv, false);
-    const bossHpMult = isBoss ? 1.15 : 1.0;
-    wild = {
-      id: critterId,
-      lv,
-      maxHp: Math.round(st.maxHp * bossHpMult),
-      hp: Math.round(st.maxHp * bossHpMult),
-      atk: st.atk,
-      spd: st.spd,
-    };
+    wild = getCore().createWildUnit(critterId, lv, isBoss, chapterId);
 
     // Ensure partner stats are synced
     const mine = getActiveMine();
@@ -570,19 +519,7 @@ const Battle = (() => {
     victoryTriggered = true;
     busy = true;
     closeSubmenu();
-    const D = getD();
-    const hero = D.HERO_BY_ID[state.heroId];
-    const expMult = (hero && hero.perk && hero.perk.expMult) ? hero.perk.expMult : 1;
-    let goldMult = (hero && hero.perk && hero.perk.goldMult) ? hero.perk.goldMult : 1;
-    if (state.tools.includes('magnet')) goldMult *= 1.35;
-
-    const alreadyDefeatedBoss = isBoss && (
-      (Array.isArray(state.defeatedBosses) && state.defeatedBosses.includes(chapterId)) ||
-      (Array.isArray(state.crests) && state.crests.includes(chapterId))
-    );
-
-    const expGain = alreadyDefeatedBoss ? 0 : Math.round((16 + wild.lv * 6) * (isBoss ? 2.5 : 1) * expMult);
-    const goldGain = alreadyDefeatedBoss ? 0 : Math.round((12 + wild.lv * 4) * (isBoss ? 3.5 : 1) * goldMult);
+    const { expGain, goldGain, rematch } = getCore().calcVictoryRewards(wild, isBoss, chapterId, state);
     state.gold += goldGain;
 
     const mine = getActiveMine();
@@ -598,7 +535,7 @@ const Battle = (() => {
     }
     if (leveledUp) AudioFX.sfx.levelUp();
 
-    if (alreadyDefeatedBoss) {
+    if (rematch) {
       setMsgKey('battleWinRematch');
     } else {
       setMsgKey('battleWin', { exp: expGain, gold: goldGain });
@@ -615,7 +552,7 @@ const Battle = (() => {
         expGain,
         goldGain,
         leveledUp,
-        rematch: alreadyDefeatedBoss,
+        rematch,
       });
     }, 1000);
   }
