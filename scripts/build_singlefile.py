@@ -10,6 +10,7 @@ JS_ORDER = [
     "js/data.js",
     "js/audio.js",
     "js/world.js",
+    "js/core.js",
     "js/art.js",
     "js/battle.js",
     "js/ui.js",

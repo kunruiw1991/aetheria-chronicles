@@ -11,6 +11,7 @@
       { "type": "file", "value": "index.html" },
       { "type": "file", "value": "README.md" },
       { "type": "file", "value": "QA_REVIEW_REQUEST.md" },
+      { "type": "file", "value": "js/battle.js" },
       { "type": "file", "value": "js/ui.js" },
       { "type": "file", "value": "js/game.js" }
     ]

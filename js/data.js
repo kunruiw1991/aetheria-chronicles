@@ -390,7 +390,7 @@ const GameData = (() => {
       name: { zh: '寒穹冰龙', en: 'Glacieron' },
       skill: { zh: '永冻星陨', en: 'Permafrost Nova' },
       desc: { zh: '冰冠要塞的传说守护龙，晶翼展动间唤醒整座雪峰的极光。', en: 'Legendary crystal-winged ice dragon ruling Glacial Crown Keep.' },
-      hp: 118, atk: 24, spd: 24, catchBase: 0.25,
+      hp: 155, atk: 33, spd: 24, catchBase: 0.25,
       art: { shape: 'dragon', c1: '#38bdf8', c2: '#f0f9ff', c3: '#1d4ed8', accent: '#c084fc', wing: 'crystal', crown: 'crystal', aura: '#93c5fd' },
     },
 
@@ -432,7 +432,7 @@ const GameData = (() => {
       name: { zh: '星界圣龙', en: 'Celestiar' },
       skill: { zh: '创世星河', en: 'Genesis Starfall' },
       desc: { zh: '艾瑟瑞亚大陆的至高守护圣龙，掌管星辰与五大王国的永恒平衡。', en: 'Supreme celestial dragon guardian watching over all five realms of Aetheria.' },
-      hp: 132, atk: 27, spd: 28, catchBase: 0.24,
+      hp: 175, atk: 37, spd: 28, catchBase: 0.24,
       art: { shape: 'dragon', c1: '#9333ea', c2: '#fef08a', c3: '#4c1d95', accent: '#38bdf8', wing: 'astral', crown: 'halo', aura: '#d8b4fe' },
     },
   ];

@@ -6,16 +6,16 @@ A bilingual (中文 / English), original-IP, multi-chapter Classic Fantasy RPG b
 
 1. **Native WeChat Mini Game (`小游戏`) — Pure Canvas Runtime (Zero DOM)**
    - Root entry: [`game.js`](game.js) → [`minigame/native_app.js`](minigame/native_app.js)
-   - Manifest & DevTools config: [`game.json`](game.json), [`project.config.json`](project.config.json)
+   - Shared zero-DOM game core: [`js/core.js`](js/core.js) (shared with Web so save validation, HP scaling, bundle claims, and combat math never drift)
+   - Manifest & DevTools config: [`game.json`](game.json), [`project.config.json`](project.config.json) (excludes browser-only `js/battle.js`, `js/ui.js`, `js/game.js`, `index.html`, `css/`, and `dist/` from WeChat uploads)
    - Ad Unit IDs: [`config/ads.js`](config/ads.js) (`rewardedVideoUnitId`, `interstitialUnitId`)
    - Audio: `wx.createWebAudioContext()` via [`js/audio.js`](js/audio.js)
    - Input: `wx.onTouchStart / onTouchMove / onTouchEnd / onTouchCancel`
    - **Fail-Closed Ad Behavior**: Inside a WeChat runtime (`wx` present), if `rewardedVideoUnitId` is empty or `wx.createRewardedVideoAd` is unavailable, `Platform.showRewardedAd()` fails closed (shows an unavailable toast, grants **0** progress, never falls back to simulated web rewards).
 
-2. **Web / Browser Preview**
-   - Entry: [`index.html`](index.html) + [`css/style.css`](css/style.css) + [`js/ui.js`](js/ui.js) + [`js/game.js`](js/game.js)
-   - Self-contained single-file preview bundle: `python3 scripts/build_singlefile.py` → `dist/aetheria_chronicles.html`
-   - Browser sandbox ad simulation is explicitly gated to non-WeChat browser environments (`!Platform.isWeChat && AETHERIA_ADS_CONFIG.allowWebSimulation`).
+2. **Web / Browser Sandbox Preview**
+   - Entry: [`index.html`](index.html) + [`css/style.css`](css/style.css) + [`js/core.js`](js/core.js) + [`js/battle.js`](js/battle.js) + [`js/ui.js`](js/ui.js) + [`js/game.js`](js/game.js)
+   - Self-contained single-file browser preview bundle: `python3 scripts/build_singlefile.py` → `dist/aetheria_chronicles.html` (intentionally enables `allowWebSimulation: true` for non-WeChat browser preview; excluded from WeChat Mini Game builds).
 
 ## 📲 Importing into WeChat DevTools (`微信开发者工具`)
 

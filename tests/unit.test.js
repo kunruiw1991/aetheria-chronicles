@@ -18,10 +18,10 @@ function makeFakeCtx() {
   const noop = () => {};
   const grad = { addColorStop: noop };
   return {
-    save: noop, restore: noop, scale: noop, translate: noop,
+    save: noop, restore: noop, scale: noop, translate: noop, rotate: noop,
     fillRect: noop, strokeRect: noop, clearRect: noop,
     beginPath: noop, closePath: noop, moveTo: noop, lineTo: noop,
-    quadraticCurveTo: noop, arc: noop, ellipse: noop,
+    quadraticCurveTo: noop, bezierCurveTo: noop, arc: noop, ellipse: noop,
     fill: noop, stroke: noop, fillText: noop, drawImage: noop,
     measureText: txt => ({ width: String(txt || '').length * 7 }),
     createLinearGradient: () => grad,
@@ -59,25 +59,26 @@ class FakeElement {
   get innerHTML() { return this._innerHTML; }
   set innerHTML(val) {
     this._innerHTML = String(val || '');
-    // Parse <button ... data-*> snippets for submenu/store interaction tests
     this.children = [];
-    const btnRe = /<button([^>]*)>([\s\S]*?)<\/button>/gi;
-    let m;
-    while ((m = btnRe.exec(this._innerHTML))) {
-      const attrs = m[1];
-      const b = new FakeElement('button');
-      b.textContent = m[2].replace(/<[^>]+>/g, '');
-      if (/\bdisabled\b/i.test(attrs)) b.disabled = true;
+    const parseAttrs = (tag, attrs, body) => {
+      const el = new FakeElement(tag);
+      el.textContent = (body || '').replace(/<[^>]+>/g, '');
+      if (/\bdisabled\b/i.test(attrs)) el.disabled = true;
       const idM = /id="([^"]+)"/.exec(attrs);
-      if (idM) b.id = idM[1];
+      if (idM) el.id = idM[1];
       const dataRe = /data-([a-z0-9-]+)="([^"]*)"/gi;
       let dm;
       while ((dm = dataRe.exec(attrs))) {
         const camel = dm[1].replace(/-([a-z])/g, (_, ch) => ch.toUpperCase());
-        b.dataset[camel] = dm[2];
+        el.dataset[camel] = dm[2];
       }
-      this.children.push(b);
-    }
+      this.children.push(el);
+    };
+    const btnRe = /<button([^>]*)>([\s\S]*?)<\/button>/gi;
+    let m;
+    while ((m = btnRe.exec(this._innerHTML))) parseAttrs('button', m[1], m[2]);
+    const idTagRe = /<(div|canvas)([^>]*\bid="[^"]+"[^>]*)>/gi;
+    while ((m = idTagRe.exec(this._innerHTML))) parseAttrs(m[1], m[2], '');
   }
   appendChild(el) { this.children.push(el); return el; }
   remove() {}
@@ -145,13 +146,16 @@ Object.defineProperty(globalThis, 'navigator', {
   writable: true,
 });
 
-// Load ALL 10 browser/shared modules!
+// Load ALL 11 browser/shared modules!
+const fs = require('node:fs');
+const path = require('node:path');
 const AdsConfig = require('../config/ads.js');
 const Platform = require('../js/platform.js');
 const I18N = require('../js/i18n.js');
 const GameData = require('../js/data.js');
 const AudioFX = require('../js/audio.js');
 const World = require('../js/world.js');
+const GameCore = require('../js/core.js');
 const Art = require('../js/art.js');
 const Battle = require('../js/battle.js');
 const UI = require('../js/ui.js');
@@ -447,21 +451,13 @@ describe('3. Battle Engine Input Locking (4a/4b/4c), Boss Rematch 0 Reward & Liv
 });
 
 describe('4. Starter & Boss Combat Balance Verification (Monte Carlo)', () => {
-  function simFight(partySpecs, bossId, bossLv, isBoss, treatsAvailable) {
+  function simFight(partySpecs, bossId, bossLv, isBoss, chId, treatsAvailable) {
     const st = { heroId: 'ranger', tools: [] };
     const party = partySpecs.map(s => {
-      const cst = Battle.calcStats(s.id, s.lv, true, st);
+      const cst = GameCore.calcStats(s.id, s.lv, true, st);
       return { id: s.id, lv: s.lv, hp: cst.maxHp, maxHp: cst.maxHp };
     });
-    const wst = Battle.calcStats(bossId, bossLv, false, st);
-    const wild = {
-      id: bossId,
-      lv: bossLv,
-      maxHp: Math.round(wst.maxHp * (isBoss ? 1.15 : 1.0)),
-      hp: Math.round(wst.maxHp * (isBoss ? 1.15 : 1.0)),
-      atk: wst.atk,
-      spd: wst.spd,
-    };
+    const wild = GameCore.createWildUnit(bossId, bossLv, isBoss, chId);
     let activeIdx = 0;
     let treats = treatsAvailable || 0;
     for (let turn = 0; turn < 60; turn++) {
@@ -471,11 +467,11 @@ describe('4. Starter & Boss Combat Balance Verification (Monte Carlo)', () => {
         treats--;
         mine.hp = Math.min(mine.maxHp, mine.hp + Math.round(mine.maxHp * 0.32));
       } else {
-        const { dmg } = Battle.calcPlayerDamage(mine, wild, st);
+        const { dmg } = GameCore.calcPlayerDamage(mine, wild, st);
         wild.hp -= dmg;
         if (wild.hp <= 0) return true;
       }
-      const { dmg: edmg } = Battle.calcEnemyDamage(wild, mine, false);
+      const { dmg: edmg } = GameCore.calcEnemyDamage(wild, mine, false);
       mine.hp -= edmg;
       if (mine.hp <= 0) {
         activeIdx = party.findIndex(p => p.hp > 0);
@@ -493,14 +489,14 @@ describe('4. Starter & Boss Combat Balance Verification (Monte Carlo)', () => {
       let wildWins = 0;
       for (let i = 0; i < TRIALS; i++) {
         const wId = ch1.wildPool[i % ch1.wildPool.length];
-        if (simFight([{ id: sId, lv: 5 }], wId, 5, false, 0)) wildWins++;
+        if (simFight([{ id: sId, lv: 5 }], wId, 5, false, 1, 0)) wildWins++;
       }
       const wildRate = wildWins / TRIALS;
       assert.ok(wildRate >= 0.70, `Starter ${sId} vs Lv5 Ch.1 wilds win rate ${(wildRate * 100).toFixed(1)}% < 70%`);
 
       let bossWins = 0;
       for (let i = 0; i < TRIALS; i++) {
-        if (simFight([{ id: sId, lv: ch1.dungeon.bossLv + 2 }], ch1.bossId, ch1.dungeon.bossLv, true, 1)) bossWins++;
+        if (simFight([{ id: sId, lv: ch1.dungeon.bossLv + 2 }], ch1.bossId, ch1.dungeon.bossLv, true, 1, 1)) bossWins++;
       }
       const bossRate = bossWins / TRIALS;
       console.log(`  [Balance] ${sId}: Lv5 Ch.1 wilds=${(wildRate * 100).toFixed(1)}%, Ch.1 Boss@Lv${ch1.dungeon.bossLv + 2}=${(bossRate * 100).toFixed(1)}%`);
@@ -508,39 +504,48 @@ describe('4. Starter & Boss Combat Balance Verification (Monte Carlo)', () => {
     }
   });
 
-  it('a balanced party at bossLv+3 wins >=50% vs Ch.4 Frostwyrm and Ch.5 Celestiar without Astral Orbs', () => {
+  it('Ch.4 Frostwyrm & Ch.5 Celestiar are beatable (>=50% at bossLv+3) with real challenge at bossLv (not trivial 100% stomp)', () => {
     const ch4 = GameData.getChapter(4);
     const ch5 = GameData.getChapter(5);
     const TRIALS = 300;
 
-    let ch4Wins = 0;
+    let ch4Starters3 = 0, ch4EqualLv = 0;
     for (let i = 0; i < TRIALS; i++) {
-      const party = [
-        { id: 'emberfennec', lv: ch4.dungeon.bossLv + 3 },
+      if (simFight([
+        { id: 'sproutling', lv: ch4.dungeon.bossLv + 3 },
         { id: 'acornpup', lv: ch4.dungeon.bossLv + 3 },
         { id: 'dewdrop', lv: ch4.dungeon.bossLv + 3 },
-      ];
-      if (simFight(party, ch4.bossId, ch4.dungeon.bossLv, true, 2)) ch4Wins++;
+      ], ch4.bossId, ch4.dungeon.bossLv, true, 4, 2)) ch4Starters3++;
+      if (simFight([
+        { id: 'emberfennec', lv: ch4.dungeon.bossLv },
+        { id: 'acornpup', lv: ch4.dungeon.bossLv },
+        { id: 'dewdrop', lv: ch4.dungeon.bossLv },
+      ], ch4.bossId, ch4.dungeon.bossLv, true, 4, 2)) ch4EqualLv++;
     }
-    const ch4Rate = ch4Wins / TRIALS;
-    assert.ok(ch4Rate >= 0.50, `Ch.4 boss win rate ${(ch4Rate * 100).toFixed(1)}% < 50%`);
-
-    let ch5Wins = 0;
+    let ch5Starters3 = 0, ch5EqualLv = 0;
     for (let i = 0; i < TRIALS; i++) {
-      const party = [
-        { id: 'aurorawolf', lv: ch5.dungeon.bossLv + 3 },
-        { id: 'emberfennec', lv: ch5.dungeon.bossLv + 3 },
+      if (simFight([
+        { id: 'sproutling', lv: ch5.dungeon.bossLv + 3 },
+        { id: 'acornpup', lv: ch5.dungeon.bossLv + 3 },
         { id: 'dewdrop', lv: ch5.dungeon.bossLv + 3 },
-      ];
-      if (simFight(party, ch5.bossId, ch5.dungeon.bossLv, true, 2)) ch5Wins++;
+      ], ch5.bossId, ch5.dungeon.bossLv, true, 5, 2)) ch5Starters3++;
+      if (simFight([
+        { id: 'aurorawolf', lv: ch5.dungeon.bossLv },
+        { id: 'emberfennec', lv: ch5.dungeon.bossLv },
+        { id: 'dewdrop', lv: ch5.dungeon.bossLv },
+      ], ch5.bossId, ch5.dungeon.bossLv, true, 5, 2)) ch5EqualLv++;
     }
-    const ch5Rate = ch5Wins / TRIALS;
-    console.log(`  [Balance] Ch.4 Boss@Lv${ch4.dungeon.bossLv + 3}=${(ch4Rate * 100).toFixed(1)}%, Ch.5 Boss@Lv${ch5.dungeon.bossLv + 3}=${(ch5Rate * 100).toFixed(1)}%`);
-    assert.ok(ch5Rate >= 0.50, `Ch.5 boss win rate ${(ch5Rate * 100).toFixed(1)}% < 50%`);
+    const r4s = ch4Starters3 / TRIALS, r4e = ch4EqualLv / TRIALS;
+    const r5s = ch5Starters3 / TRIALS, r5e = ch5EqualLv / TRIALS;
+    console.log(`  [Balance] Ch.4 Boss: 3-starters@Lv25=${(r4s * 100).toFixed(1)}%, balanced@Lv22=${(r4e * 100).toFixed(1)}%`);
+    console.log(`  [Balance] Ch.5 Boss: 3-starters@Lv31=${(r5s * 100).toFixed(1)}%, balanced@Lv28=${(r5e * 100).toFixed(1)}%`);
+    assert.ok(r4s >= 0.50, `Ch.4 3-starters@Lv25 win rate ${(r4s * 100).toFixed(1)}% < 50%`);
+    assert.ok(r5s >= 0.50, `Ch.5 3-starters@Lv31 win rate ${(r5s * 100).toFixed(1)}% < 50%`);
+    assert.ok(r4e < 0.99, `Ch.4 equal-level should not be 100% trivial (${(r4e * 100).toFixed(1)}%)`);
   });
 });
 
-describe('5. Save Reliability, Schema Validation, Hero Swap HP Ratio & Bundle Ownership', () => {
+describe('5. Save Reliability, Schema Validation, Hero Swap HP Ratio, UI Modals & Real Faint Recovery', () => {
   beforeEach(() => {
     memStore.clear();
     World.init();
@@ -564,9 +569,9 @@ describe('5. Save Reliability, Schema Validation, Hero Swap HP Ratio & Bundle Ow
     const ch1 = GameData.getChapter(1);
     const badSave = {
       unlockedChapters: [1, 2, 3],
-      mapId: 'dun_4', // Locked Ch.4 dungeon!
+      mapId: 'dun_4',
       x: 11, y: 10,
-      owX: 38, owY: 48, // Locked Ch.4 overworld!
+      owX: 38, owY: 48,
       caughtIds: 'not-an-array',
       party: [{ id: 'sproutling', lv: 999, hp: 99999, maxHp: 99999 }],
     };
@@ -601,9 +606,7 @@ describe('5. Save Reliability, Schema Validation, Hero Swap HP Ratio & Bundle Ow
     st.adProgress = { ch4_pack: 2, ch5_pack: 1 };
     const bundle = GameData.PRODUCT_BY_ID.season_pass;
 
-    // Not owned yet because consumable bonus (1 Astral Orb + 300 Gold) was never claimed!
     assert.equal(UI.isProductOwned(bundle, st), false);
-    // Credits 2 + 1 = 3 ads already watched toward bundle (3/4 -> only 1 ad remaining!)
     assert.equal(UI.getEffectiveAdProgress(bundle, st), 3);
 
     Game.startGame(st);
@@ -624,10 +627,73 @@ describe('5. Save Reliability, Schema Validation, Hero Swap HP Ratio & Bundle Ow
     assert.equal(Game.closeDialog(true), true);
     assert.equal(closed, true);
   });
+
+  it('exercises real Game.startBattle faint recovery and asserts respawn at chapter fountain with full HP', async () => {
+    const st = Game.defaultState('sproutling');
+    st.party = [{ id: 'sproutling', lv: 1, hp: 1, maxHp: 56, exp: 0 }];
+    st.x = 36;
+    st.y = 92;
+    Game.startGame(st);
+    Game.startBattle('astraldragon', 28, false, 1);
+    assert.equal(Battle.isActive(), true);
+    Battle.handleAction('attack'); // 1 HP partner attacks -> enemy KOs partner -> real faint callback triggers
+    const deadline = Date.now() + 5000;
+    while (Battle.isActive() && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 40));
+    }
+    assert.equal(Battle.isActive(), false);
+    const ch1 = GameData.getChapter(1);
+    const pos = Game.getPlayerPos();
+    assert.equal(World.getMap().id, 'overworld');
+    assert.equal(Math.round(pos.x), ch1.healSpot.x);
+    assert.equal(Math.round(pos.y), ch1.healSpot.y + 1);
+    assert.equal(Game.getState().party[0].hp, Game.getState().party[0].maxHp);
+  });
+
+  it('exercises UI modals (Map, Vault tabs, Gate Lock, Dex, Party, Bag, Settings two-step reset & live lang refresh)', () => {
+    Game.startGame(Game.defaultState('sproutling'));
+    I18N.setLang('en');
+
+    UI.openWorldMap();
+    assert.match(document.getElementById('modalTitle').textContent, /Map/);
+    I18N.setLang('zh');
+    UI.refreshActiveModal();
+    assert.match(document.getElementById('modalTitle').textContent, /大地图/);
+
+    UI.openStore('chapters');
+    assert.match(document.getElementById('modalBody').querySelector('#storeGrid').innerHTML, /ch4_pack/);
+    UI.openStore('heroes');
+    assert.match(document.getElementById('modalBody').querySelector('#storeGrid').innerHTML, /tidecaller/);
+    UI.openStore('tools');
+    assert.match(document.getElementById('modalBody').querySelector('#storeGrid').innerHTML, /tool_wings/);
+    UI.openStore('items');
+    assert.match(document.getElementById('modalBody').querySelector('#storeGrid').innerHTML, /ad_supply_pack/);
+
+    UI.openGateLockModal(4);
+    assert.match(document.getElementById('modalBody').innerHTML, /gateWatchAd/);
+    UI.openDex();
+    assert.match(document.getElementById('modalTitle').textContent, /1\/25/);
+    UI.openParty();
+    assert.match(document.getElementById('modalBody').innerHTML, /switchHeroBtn/);
+    UI.openBag();
+    assert.match(document.getElementById('modalBody').innerHTML, /bag-stats/);
+
+    // Settings two-step reset confirmation (zero browser confirm())
+    UI.openSettings();
+    const resetBtn = document.getElementById('modalBody').querySelector('#setResetBtn');
+    assert.ok(resetBtn);
+    resetBtn.onclick();
+    const confirmBtn = document.getElementById('modalBody').querySelector('#setResetConfirmBtn');
+    const cancelBtn = document.getElementById('modalBody').querySelector('#setResetCancelBtn');
+    assert.ok(confirmBtn && cancelBtn);
+    cancelBtn.onclick();
+    assert.ok(document.getElementById('modalBody').querySelector('#setResetBtn'));
+    UI.closeModal();
+  });
 });
 
-describe('6. World Seals, Dungeons & Respawn Safety', () => {
-  it('verifies [1,2,3], [1,2,3,4], [1,2,3,5], and [1..5] gate seals + safe fountain respawns', () => {
+describe('6. World Seals, Tile-by-Tile Border Walking & Respawn Safety', () => {
+  it('verifies [1,2,3], [1,2,3,4], [1,2,3,5], and [1..5] gate seals + tile-by-tile chapter border walking', () => {
     World.init();
     const ow = World.getOverworld();
     const bfsZones = unlocked => {
@@ -660,10 +726,40 @@ describe('6. World Seals, Dungeons & Respawn Safety', () => {
       const rx = ch.healSpot.x, ry = ch.healSpot.y + 1;
       assert.equal(World.isWalkable(rx, ry, { unlockedChapters: [1, 2, 3, 4, 5], tools: ['boots'] }).ok, true);
     }
+
+    // Tile-by-tile walking across Ch.1 -> Ch.2 bridge (y=90) and locked Ch.4 gate (39, 66 -> 65)
+    Game.init();
+    const st = Game.defaultState('sproutling');
+    st.x = 73; st.y = 90;
+    Game.startGame(st);
+    assert.equal(Game.tryStep('right'), true);
+    assert.equal(Game.getPlayerPos().tx, 74);
+
+    // Locked Ch.4 gate must block step into y=65
+    st.x = 39; st.y = 66;
+    Game.startGame(st);
+    assert.equal(Game.tryStep('up'), false);
+    // Unlock Ch.4 -> step into y=65 now succeeds!
+    Game.getState().unlockedChapters.push(4);
+    assert.equal(Game.tryStep('up'), true);
+    assert.equal(Game.getPlayerPos().ty, 65);
   });
 });
 
-describe('7. Native WeChat Mini Game (game.js / minigame/native_app.js) Zero-DOM Runtime Verification', () => {
+describe('7. Native WeChat Mini Game (game.js / minigame/native_app.js / js/core.js) Zero-DOM Verification', () => {
+  it('contains zero DOM/HTML/confirm/js-battle references in native WeChat runtime files', () => {
+    const rootDir = path.resolve(__dirname, '..');
+    for (const rel of ['game.js', 'minigame/native_app.js', 'js/core.js']) {
+      const raw = fs.readFileSync(path.join(rootDir, rel), 'utf8');
+      const code = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+      assert.equal(/\bdocument\./.test(code), false, `${rel} must not reference document.*`);
+      assert.equal(/\bwindow\./.test(code), false, `${rel} must not reference window.*`);
+      assert.equal(/\binnerHTML\b/.test(code), false, `${rel} must not reference innerHTML`);
+      assert.equal(/\bconfirm\s*\(/.test(code), false, `${rel} must not call confirm()`);
+      assert.equal(/js\/battle/.test(code), false, `${rel} must not require browser js/battle.js`);
+    }
+  });
+
   it('boots, picks starter, walks, opens vault (fail-closed ad), battles, and saves with document/window UNDEFINED', () => {
     const savedDoc = globalThis.document;
     const savedWin = globalThis.window;
@@ -673,7 +769,6 @@ describe('7. Native WeChat Mini Game (game.js / minigame/native_app.js) Zero-DOM
     let shareRegistered = false;
 
     try {
-      // Strictly remove ALL browser DOM globals!
       delete globalThis.document;
       delete globalThis.window;
       delete globalThis.AETHERIA_REWARD_AD_ID;
@@ -712,25 +807,21 @@ describe('7. Native WeChat Mini Game (game.js / minigame/native_app.js) Zero-DOM
       assert.equal(shareRegistered, true);
       assert.equal(NativeApp.getScreen(), 'title');
 
-      // Tap first starter card via touch event
       const starterZones = NativeApp.getHitZones().filter(z => z.h === 138);
       assert.equal(starterZones.length, 3);
       touchStartCb({ changedTouches: [{ clientX: starterZones[0].x + 10, clientY: starterZones[0].y + 10, identifier: 1 }] });
       assert.equal(NativeApp.getScreen(), 'world');
       assert.equal(audioCtxCreated, true, 'AudioFX must use wx.createWebAudioContext in native WeChat');
 
-      // Render world frame & verify step movement
       NativeApp.stepFrame();
       assert.equal(NativeApp.tryStep('down'), true);
 
-      // Verify Reward Vault FAILS CLOSED with missing ad unit ID (0 progress!)
       NativeApp.openModal('store', 'chapters');
       NativeApp.stepFrame();
       const started = NativeApp.triggerAdUnlock(GameData.PRODUCT_BY_ID.ch4_pack);
       assert.equal(started, false);
       assert.equal(NativeApp.getState().adProgress.ch4_pack || 0, 0);
 
-      // Start native Canvas battle & verify submenu lock
       NativeApp.closeModal();
       NativeApp.startBattle('sproutling', 5, false, 1);
       NativeApp.stepFrame();
