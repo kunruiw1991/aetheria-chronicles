@@ -4,6 +4,7 @@ import pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 JS_ORDER = [
+    "config/ads.js",
     "js/platform.js",
     "js/i18n.js",
     "js/data.js",

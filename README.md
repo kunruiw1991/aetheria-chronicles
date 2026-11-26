@@ -1,26 +1,57 @@
 # 🌟 Aetheria Chronicles | 星境奇旅：艾瑟瑞亚大陆
 
-A **100% original-IP**, bilingual (中文 / English) multi-chapter Classic Fantasy RPG designed for **WeChat Personal Mini Game + IAA Ad Monetization (`个人主体 + 流量主激励视频/插屏广告变现`)** — zero company registration cost, zero game ISBN (`版号`) required, and solo-dev ready!
+A bilingual (中文 / English), original-IP, multi-chapter Classic Fantasy RPG built for **WeChat Personal Mini Game + Pure IAA Ad Monetization (`个人主体 + 微信流量主激励视频/插屏广告`)** — with zero cash paywalls (`¥`/`$`/MidasPay).
 
-## 🗺️ 5 Interconnected Fantasy Chapters (First 3 Open · Ch. 4–5 Free Ad-Unlock!)
+## 🏗️ Two Runtime Targets (Shared Core Logic)
+
+1. **Native WeChat Mini Game (`小游戏`) — Pure Canvas Runtime (Zero DOM)**
+   - Root entry: [`game.js`](game.js) → [`minigame/native_app.js`](minigame/native_app.js)
+   - Manifest & DevTools config: [`game.json`](game.json), [`project.config.json`](project.config.json)
+   - Ad Unit IDs: [`config/ads.js`](config/ads.js) (`rewardedVideoUnitId`, `interstitialUnitId`)
+   - Audio: `wx.createWebAudioContext()` via [`js/audio.js`](js/audio.js)
+   - Input: `wx.onTouchStart / onTouchMove / onTouchEnd / onTouchCancel`
+   - **Fail-Closed Ad Behavior**: Inside a WeChat runtime (`wx` present), if `rewardedVideoUnitId` is empty or `wx.createRewardedVideoAd` is unavailable, `Platform.showRewardedAd()` fails closed (shows an unavailable toast, grants **0** progress, never falls back to simulated web rewards).
+
+2. **Web / Browser Preview**
+   - Entry: [`index.html`](index.html) + [`css/style.css`](css/style.css) + [`js/ui.js`](js/ui.js) + [`js/game.js`](js/game.js)
+   - Self-contained single-file preview bundle: `python3 scripts/build_singlefile.py` → `dist/aetheria_chronicles.html`
+   - Browser sandbox ad simulation is explicitly gated to non-WeChat browser environments (`!Platform.isWeChat && AETHERIA_ADS_CONFIG.allowWebSimulation`).
+
+## 📲 Importing into WeChat DevTools (`微信开发者工具`)
+
+1. Open **WeChat DevTools** → **Import Project (`导入项目`)** → select the repository root directory.
+2. Confirm **Mode** is **Mini Game (`小游戏`, `compileType: "game"`)**.
+3. Use `touristappid` for initial simulator preview, or enter your registered personal Mini Game `AppID` in [`project.config.json`](project.config.json).
+4. Once your personal Mini Game unlocks **Traffic Master (`流量主`)** in `mp.weixin.qq.com`, paste your real `adunit-...` IDs into [`config/ads.js`](config/ads.js).
+5. Verify startup, Canvas rendering, audio, touch input, rewarded video ads, interstitial ads, and sharing in WeChat DevTools and on physical iOS & Android devices.
+
+### Remaining Account / Device Dependencies
+- Personal Mini Game registration (`个人主体小游戏`), real-name verification, and ICP filing (`小程序备案`) in WeChat MP Console.
+- Traffic Master (`流量主`) activation & real `adunit-...` IDs in [`config/ads.js`](config/ads.js).
+- First-hand startup, rendering, audio, and live-ad verification in WeChat DevTools and on physical iOS/Android devices (automated tests in this repo run against Chromium and a zero-DOM mocked-`wx` Node runtime, not the proprietary WeChat runtime).
+
+### Offline Save Limitation
+- Saves are stored locally (`wx.setStorageSync` / `localStorage`) with schema & unlocked-chapter coordinate validation on load and rollback on write failure.
+- Because v1 has no backend server, local device storage is client-mutable; tamper-resistant monetization/progress enforcement would require server-side ad verification callbacks in a future version.
+
+## 🗺️ 5 Interconnected Fantasy Chapters
 | Chapter | Region | Access | Sanctum Dungeon & Guardian Boss |
 | :-: | :--- | :-: | :--- |
-| **Ch. 1** | 🌿 Emerald Meadow & Dawnwood (`翡翠平原 · 晨木镇`) | **OPEN FREE** | Ancient Root Sanctum · **Verdant Stag (`苍木灵鹿`)** |
-| **Ch. 2** | 🐚 Coral Bay & Tidebreak Harbor (`珊瑚海湾 · 潮汐港`) | **OPEN FREE** | Sunken Pearl Grotto · **Tidecrest (`沧澜海龙`)** |
-| **Ch. 3** | ☀️ Sunfire Desert & Oasis Citadel (`烈日沙城 · 绿洲古城`) | **OPEN FREE** | Solar Pyramid Vault · **Heliowing (`烈阳金凤`)** |
+| **Ch. 1** | 🌿 Emerald Meadow & Dawnwood (`翡翠平原 · 晨木镇`) | **FREE** | Ancient Root Sanctum · **Verdant Stag (`苍木灵鹿`)** |
+| **Ch. 2** | 🐚 Coral Bay & Tidebreak Harbor (`珊瑚海湾 · 潮汐港`) | **FREE** | Sunken Pearl Grotto · **Tidecrest (`沧澜海龙`)** |
+| **Ch. 3** | ☀️ Sunfire Desert & Oasis Citadel (`烈日沙城 · 绿洲古城`) | **FREE** | Solar Pyramid Vault · **Heliowing (`烈阳金凤`)** |
 | **Ch. 4** | ❄️ Frostpeak Citadel & Glacier (`雪峰古堡 · 冰晶雪原`) | **🎬 2 Rewarded Ads** | Glacial Crown Keep · **Glacieron (`寒穹冰龙`)** |
 | **Ch. 5** | ✨ Starlight Sky Sanctum (`星界神殿 · 苍穹浮岛`) | **🎬 3 Rewarded Ads** | Celestial Throne Sanctum · **Celestiar (`星界圣龙`)** |
 
-## 🎬 Solo-Dev IAA Monetization Funnel (Zero Cash Paywalls)
-- **Chapters 4 & 5 Border Seals**: Players explore Chapters 1–3 seamlessly, then watch 2 or 3 Rewarded Video Ads (`wx.createRewardedVideoAd`) to permanently unlock Chapters 4 & 5—or watch 4 ads for the **Grand Explorer All-Chapter Bundle** (Ch.4 + Ch.5 + Frost Valkyrie + Aether Wings + 5 Astral Orbs + 300 Gold). Progress is saved persistently (`0/2 → 1/2 → 2/2`).
-- **Heroes & Fancy Tools**: Unlockable via in-game Gold or 1–3 Rewarded Video Ads (e.g., *Aether Wings* unlocks instant World Map Fast Travel).
-- **Repeatable Ad Supply Drop**: Watch 1 ad anytime for `+3 Prism Orbs + 3 Treats + 100 Gold`.
-- **Gentle Interstitial Ad**: Cooldown-capped (`120s`) hook (`wx.createInterstitialAd`) on dungeon exit.
-- **WeChat Organic Sharing**: Calls `wx.showShareMenu` for viral friend/group sharing.
+## 🧪 Automated Tests & Verification Commands
 
-## ✅ Automated Testing & Coverage
-- **Unit & Integration Suite (Node.js V8 Coverage)**: `node --test --experimental-test-coverage tests/unit.test.js`
-  - Tests Web & WeChat `wx` IAA APIs (including singleton `offClose` non-stacking & `120s` interstitial cooldown), strict 100% CN/EN key & `{var}` placeholder parity, `[1,2,3]` AND `[1,2,3,5]` border gate seals, and all 5 fountain respawn coordinates.
-- **Real Chromium Playwright E2E + CDP V8 Coverage**: `python3 tests/e2e_coverage.py`
-  - Tests both Desktop (`1100×720`) and WeChat Mobile Portrait (`390×844`) viewports, full IAA ad-unlock funnel, zero cash paywalls, and real V8 line coverage across all 9 JS modules.
-- **Single-File Preview Bundle**: `python3 scripts/build_singlefile.py` → [`dist/aetheria_chronicles.html`](dist/aetheria_chronicles.html) (~220 KB, <6% of WeChat's 4MB initial package cap).
+```bash
+# 1. Node.js Unit, Balance Monte Carlo & Zero-DOM Native WeChat Runtime Tests (V8 coverage)
+node --test --experimental-test-coverage tests/unit.test.js
+
+# 2. Rebuild single-file browser preview bundle
+python3 scripts/build_singlefile.py
+
+# 3. Chromium Playwright E2E + UTF-16 Mapped V8 Coverage (1280x800, 390x844, 360x800)
+python3 tests/e2e_coverage.py
+```

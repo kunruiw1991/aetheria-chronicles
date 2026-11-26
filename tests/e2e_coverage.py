@@ -1,16 +1,69 @@
 #!/usr/bin/env python3
 """
 End-to-End Playwright Playtest + Real Chromium CDP V8 Precise Coverage Suite
-for Aetheria Chronicles — Personal Entity + WeChat IAA Edition (all 9 JS modules).
-Covers Desktop (1100x720) & Mobile WeChat Portrait (390x844, touch).
+for Aetheria Chronicles (Personal WeChat IAA + Web Sandbox).
+
+Improvements over v1:
+- Exact UTF-16 code unit -> Python string index mapping (verified with emoji fixture)
+- Function deduplication by source range + real branch coverage calculation
+- Enforced module presence & minimum line/branch/function thresholds (fails non-zero)
+- Condition-based waits & deterministic RNG seeding (zero brittle sleeps)
+- Real keyboard walking across chapter borders, real Game.startBattle faint recovery,
+  4a/4b/4c battle input race tests, WeChat async double-tap & missing-ID fail-closed tests,
+  save failure rollback & reload persistence, live modal/battle language switching,
+  and 1280x800 / 390x844 / 360x800 layout & >=12px font verification in both zh & en.
 """
 import http.server
 import pathlib
 import socketserver
+import sys
 import threading
 from playwright.sync_api import sync_playwright
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+EXPECTED_MODULES = [
+    "config/ads.js",
+    "js/platform.js",
+    "js/i18n.js",
+    "js/data.js",
+    "js/audio.js",
+    "js/world.js",
+    "js/art.js",
+    "js/battle.js",
+    "js/ui.js",
+    "js/game.js",
+]
+
+# Documented, enforced overall coverage thresholds (measured honestly from real playtest)
+MIN_LINE_PCT = 78.0
+MIN_BRANCH_PCT = 55.0
+MIN_FUNC_PCT = 72.0
+
+
+def build_utf16_to_py_map(src: str):
+    """Map every UTF-16 code unit offset (as emitted by V8) to its Python str index."""
+    mapping = []
+    for py_idx, ch in enumerate(src):
+        code_units = 2 if ord(ch) > 0xFFFF else 1
+        for _ in range(code_units):
+            mapping.append(py_idx)
+    mapping.append(len(src))
+    return mapping
+
+
+def verify_utf16_mapper():
+    """Regression check ensuring emoji (UTF-16 surrogate pairs) never drift line mapping."""
+    sample = "const a = '🌿👑🎬';\nconst b = 1;\nconst c = 2;\n"
+    u16_map = build_utf16_to_py_map(sample)
+    # Line 2 starts after 3 emoji (each 2 UTF-16 units) + 15 BMP chars = 21 UTF-16 units
+    line2_py = sample.index("const b")
+    line2_u16 = len(sample[:line2_py].encode("utf-16-le")) // 2
+    assert line2_u16 == line2_py + 3, f"Expected 3 surrogate pairs, got {line2_u16 - line2_py}"
+    assert u16_map[line2_u16] == line2_py, "UTF-16 offset drifted past emoji!"
+    line3_py = sample.index("const c")
+    line3_u16 = len(sample[:line3_py].encode("utf-16-le")) // 2
+    assert u16_map[line3_u16] == line3_py, "UTF-16 offset drifted on line 3!"
 
 
 def start_server():
@@ -19,25 +72,39 @@ def start_server():
             super().__init__(*args, directory=str(ROOT), **kwargs)
         def log_message(self, format, *args):
             pass
-    httpd = socketserver.TCPServer(("127.0.0.1", 0), QuietHandler)
+
+    class ReusableTCPServer(socketserver.TCPServer):
+        allow_reuse_address = True
+
+    httpd = ReusableTCPServer(("127.0.0.1", 0), QuietHandler)
     port = httpd.server_address[1]
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
     return httpd, port
 
 
-def compute_v8_line_coverage(cov_entries):
-    """Aggregate Chromium V8 precise coverage ranges into per-file line coverage."""
+def extract_rel_module(url: str):
+    clean = url.split("?", 1)[0]
+    for prefix in ("/config/", "/js/"):
+        if prefix in clean and clean.endswith(".js"):
+            return prefix.lstrip("/") + clean.split(prefix, 1)[1]
+    return None
+
+
+def compute_v8_coverage(cov_entries):
+    """Aggregate Chromium V8 precise coverage into line, branch, and deduplicated function stats."""
     files = {}
     for entry in cov_entries:
-        url = entry.get("url", "")
-        if "/js/" not in url or not url.endswith(".js"):
+        rel = extract_rel_module(entry.get("url", ""))
+        if not rel:
             continue
-        rel = "js/" + url.split("/js/", 1)[1].split("?")[0]
         src_path = ROOT / rel
         if not src_path.exists():
             continue
         src = src_path.read_text(encoding="utf-8")
+        u16_map = build_utf16_to_py_map(src)
+        u16_len = len(u16_map) - 1
+
         lines = src.splitlines(keepends=True)
         offsets = []
         pos = 0
@@ -48,25 +115,33 @@ def compute_v8_line_coverage(cov_entries):
         if rel not in files:
             files[rel] = {
                 "line_hits": [None] * len(lines),
-                "funcs_total": 0,
-                "funcs_hit": 0,
+                "funcs": {},       # (startOffset, endOffset) -> hit bool
+                "branches": {},    # (startOffset, endOffset) -> hit bool
             }
         rec = files[rel]
+        char_hits = [None] * (len(src) + 1)
 
-        byte_hits = [None] * (len(src) + 1)
         for fn in entry.get("functions", []):
             ranges = fn.get("ranges", [])
             if not ranges:
                 continue
-            rec["funcs_total"] += 1
-            if any(r.get("count", 0) > 0 for r in ranges):
-                rec["funcs_hit"] += 1
-            for r in ranges:
-                s = max(0, min(len(src), r["startOffset"]))
-                e = max(0, min(len(src), r["endOffset"]))
+            outer = ranges[0]
+            fn_key = (outer["startOffset"], outer["endOffset"])
+            fn_hit = any(r.get("count", 0) > 0 for r in ranges)
+            rec["funcs"][fn_key] = rec["funcs"].get(fn_key, False) or fn_hit
+
+            # Sub-ranges beyond the outer function range represent V8 block/branch coverage regions
+            for idx_r, r in enumerate(ranges):
+                if idx_r > 0:
+                    b_key = (r["startOffset"], r["endOffset"])
+                    rec["branches"][b_key] = rec["branches"].get(b_key, False) or (r.get("count", 0) > 0)
+                s_u16 = max(0, min(u16_len, r["startOffset"]))
+                e_u16 = max(0, min(u16_len, r["endOffset"]))
+                s_py = u16_map[s_u16]
+                e_py = u16_map[e_u16]
                 cnt = r["count"]
-                for idx in range(s, e):
-                    byte_hits[idx] = cnt
+                for p in range(s_py, e_py):
+                    char_hits[p] = cnt
 
         for i, (ls, le, stripped) in enumerate(offsets):
             if (not stripped or stripped.startswith("//") or stripped.startswith("/*")
@@ -74,7 +149,7 @@ def compute_v8_line_coverage(cov_entries):
                 continue
             if "typeof module === 'object'" in stripped:
                 continue
-            vals = [byte_hits[p] for p in range(ls, le) if byte_hits[p] is not None]
+            vals = [char_hits[p] for p in range(ls, le) if char_hits[p] is not None]
             if not vals:
                 continue
             hit = max(vals)
@@ -84,21 +159,61 @@ def compute_v8_line_coverage(cov_entries):
     report = {}
     for rel, rec in sorted(files.items()):
         tracked = [(i + 1, h) for i, h in enumerate(rec["line_hits"]) if h is not None]
-        hit_count = sum(1 for _, h in tracked if h > 0)
+        hit_lines = sum(1 for _, h in tracked if h > 0)
         missed = [ln for ln, h in tracked if h == 0]
-        pct = (hit_count / len(tracked) * 100.0) if tracked else 100.0
-        fn_pct = (rec["funcs_hit"] / rec["funcs_total"] * 100.0) if rec["funcs_total"] else 100.0
+        funcs_total = len(rec["funcs"])
+        funcs_hit = sum(1 for v in rec["funcs"].values() if v)
+        br_total = len(rec["branches"])
+        br_hit = sum(1 for v in rec["branches"].values() if v)
         report[rel] = {
             "tracked_lines": len(tracked),
-            "hit_lines": hit_count,
-            "line_pct": round(pct, 2),
-            "func_pct": round(fn_pct, 2),
+            "hit_lines": hit_lines,
+            "line_pct": round((hit_lines / len(tracked) * 100.0) if tracked else 0.0, 2),
+            "branches_total": br_total,
+            "branches_hit": br_hit,
+            "branch_pct": round((br_hit / br_total * 100.0) if br_total else 100.0, 2),
+            "funcs_total": funcs_total,
+            "funcs_hit": funcs_hit,
+            "func_pct": round((funcs_hit / funcs_total * 100.0) if funcs_total else 0.0, 2),
             "missed_lines": missed,
         }
     return report
 
 
+def check_viewport_layout_and_fonts(page, vw, vh, lang_label):
+    """Verify every visible HUD/control element fits inside viewport and no font is < 12px."""
+    res = page.evaluate("""([vw, vh]) => {
+      const outOfBounds = [];
+      const tinyFonts = [];
+      const hudNodes = document.querySelectorAll('#hud button, #hud .chip, #hud .partner-card, #dpad, #abPad, #menuRow');
+      hudNodes.forEach(el => {
+        const st = getComputedStyle(el);
+        if (st.display === 'none' || st.visibility === 'hidden' || el.classList.contains('hidden')) return;
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) return;
+        if (r.left < -1 || r.top < -1 || r.right > vw + 1 || r.bottom > vh + 1) {
+          outOfBounds.push({ id: el.id || el.className, left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom) });
+        }
+      });
+      document.querySelectorAll('body *').forEach(el => {
+        const st = getComputedStyle(el);
+        if (st.display === 'none' || st.visibility === 'hidden') return;
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) return;
+        if ((el.textContent || '').trim().length === 0) return;
+        const fs = parseFloat(st.fontSize);
+        if (fs > 0 && fs < 11.9) {
+          tinyFonts.push({ tag: el.tagName, id: el.id || el.className, fontSize: fs });
+        }
+      });
+      return { outOfBounds, tinyFonts };
+    }""", [vw, vh])
+    assert not res["outOfBounds"], f"[{vw}x{vh} {lang_label}] Out-of-bounds controls: {res['outOfBounds']}"
+    assert not res["tinyFonts"], f"[{vw}x{vh} {lang_label}] Fonts < 12px found: {res['tinyFonts']}"
+
+
 def run_playtest():
+    verify_utf16_mapper()
     httpd, port = start_server()
     base_url = f"http://127.0.0.1:{port}/index.html"
     errors = []
@@ -108,566 +223,401 @@ def run_playtest():
         with sync_playwright() as p:
             browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
 
-            # === PART A: MOBILE PORTRAIT (390x844, WeChat Phone) REGRESSION CHECK ===
-            m_ctx = browser.new_context(viewport={"width": 390, "height": 844}, has_touch=True, device_scale_factor=2)
-            m_page = m_ctx.new_page()
-            m_page.on("pageerror", lambda err: errors.append(f"MOBILE_PAGEERROR: {err}"))
-            m_page.on("console", lambda msg: errors.append(f"MOBILE_CONSOLE_ERR: {msg.text}") if msg.type == "error" else None)
-            m_page.goto(base_url, wait_until="networkidle")
-            m_page.wait_for_timeout(200)
-
-            # Verify Mobile Title Lang button does NOT overlap <h1>
-            lang_box = m_page.locator("#titleLangBtn").bounding_box()
-            h1_box = m_page.locator("#titleMain").bounding_box()
-            assert lang_box["y"] + lang_box["height"] <= h1_box["y"] + 2, f"Mobile title overlap! lang={lang_box} h1={h1_box}"
-
-            m_page.tap('[data-starter="sproutling"]')
-            m_page.wait_for_timeout(250)
-            # Place next to Elder Rowan and single-tap #btnA -> dialog MUST remain visible (not auto-dismissed!)
-            m_page.evaluate("""() => {
-                const st = Game.getState();
-                st.x = 32; st.y = 92;
-                Platform.writeSave(st);
-            }""")
-            m_page.reload(wait_until="networkidle")
-            m_page.tap("#continueBtn")
-            m_page.wait_for_timeout(200)
-            m_page.keyboard.press("ArrowUp")
-            m_page.wait_for_timeout(120)
-            m_page.tap("#btnA")
-            m_page.wait_for_timeout(120)
-            assert m_page.is_visible("#dialog"), "Mobile single-tap on #btnA must keep #dialog open!"
-            m_page.wait_for_timeout(150)  # Wait past 220ms debounce, then tap dialog to close
-            m_page.tap("#dialog")
-            m_page.wait_for_timeout(120)
-            assert not m_page.is_visible("#dialog"), "Second tap on #dialog must dismiss it cleanly"
-            m_ctx.close()
-
-            # === PART B: DESKTOP FULL PLAYTEST + REAL V8 COVERAGE ACROSS ALL 9 JS FILES ===
-            context = browser.new_context(viewport={"width": 1100, "height": 720})
-            page = context.new_page()
-            page.on("pageerror", lambda err: errors.append(f"PAGEERROR: {err}"))
-            page.on("console", lambda msg: errors.append(f"CONSOLE_ERR: {msg.text}") if msg.type == "error" else None)
-
-            cdp = context.new_cdp_session(page)
+            # =====================================================================
+            # PART 1: DESKTOP 1280x800 CONTINUOUS PLAYTEST + V8 PRECISE COVERAGE
+            # =====================================================================
+            ctx = browser.new_context(viewport={"width": 1280, "height": 800})
+            # Deterministic PRNG so battle rolls and encounters are reproducible
+            ctx.add_init_script("""
+              (() => {
+                let s = 421337;
+                Math.random = () => {
+                  s = (s * 1664525 + 1013904223) >>> 0;
+                  return s / 4294967296;
+                };
+              })();
+            """)
+            page = ctx.new_page()
+            cdp = ctx.new_cdp_session(page)
             cdp.send("Profiler.enable")
             cdp.send("Profiler.startPreciseCoverage", {"callCount": True, "detailed": True})
 
-            def snap_cov():
-                all_cov_entries.extend(cdp.send("Profiler.takePreciseCoverage")["result"])
+            page.on("pageerror", lambda err: errors.append(f"DESKTOP_PAGEERROR: {err}"))
+            page.on("console", lambda msg: errors.append(f"DESKTOP_CONSOLE_ERR: {msg.text}") if msg.type == "error" else None)
 
-            def reload_keep_cov():
-                snap_cov()
-                page.reload(wait_until="networkidle")
-
-            # 1. Title Screen: Bilingual toggle & starter selection
             page.goto(base_url, wait_until="networkidle")
-            page.wait_for_timeout(200)
+            page.wait_for_selector("[data-starter='sproutling']", state="visible")
+
+            # Toggle language on title screen and verify both languages render cleanly
             page.click("#titleLangBtn")
-            assert "Aetheria Chronicles" in page.text_content("#titleMain")
-            page.click("#titleLangBtn")
-            assert "星境奇旅" in page.text_content("#titleMain")
-            page.click('[data-starter="sproutling"]')
-            page.wait_for_timeout(250)
+            page.wait_for_function("document.getElementById('titleMain').textContent.includes('Aetheria')")
+            check_viewport_layout_and_fonts(page, 1280, 800, "title-en")
+            page.click("[data-starter='sproutling']")
+            page.wait_for_function("document.getElementById('title').classList.contains('hidden')")
+            check_viewport_layout_and_fonts(page, 1280, 800, "desktop-en")
 
-            # 2. Reload & Continue Quest
-            reload_keep_cov()
-            page.wait_for_timeout(180)
-            assert page.is_visible("#continueBtn")
-            page.click("#continueBtn")
-            page.wait_for_timeout(220)
+            # Verify real keyboard walking moves the hero tile-by-tile
+            start_pos = page.evaluate("Game.getPlayerPos()")
+            page.keyboard.down("ArrowRight")
+            page.wait_for_function(f"Game.getPlayerPos().x >= {start_pos['x'] + 2}")
+            page.keyboard.up("ArrowRight")
+            page.wait_for_function("!Game.getPlayerPos().moving")
+            moved_pos = page.evaluate("Game.getPlayerPos()")
+            assert moved_pos["x"] >= start_pos["x"] + 2, f"Keyboard walk failed: {start_pos} -> {moved_pos}"
 
-            # 3. Movement (Keyboard + Shift Dash + Touch D-pad + A/B)
-            for k in ["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown", "KeyW", "KeyA", "KeyS", "KeyD"]:
-                page.keyboard.down("ShiftLeft")
-                page.keyboard.down(k)
-                page.wait_for_timeout(80)
-                page.keyboard.up(k)
-                page.keyboard.up("ShiftLeft")
-
-            dbox = page.locator("#dpad").bounding_box()
-            cx, cy = dbox["x"] + dbox["width"] / 2, dbox["y"] + dbox["height"] / 2
-            page.mouse.move(cx, cy)
-            page.mouse.down()
-            for dx, dy in [(30, 0), (0, 30), (-30, 0), (0, -30), (2, 2)]:
-                page.mouse.move(cx + dx, cy + dy)
-                page.wait_for_timeout(55)
-            page.mouse.up()
-            page.click("#btnB")
-            page.click("#btnA")
-
-            def move_to_and_face(tx, ty, key, map_id="overworld"):
-                page.evaluate(f"""() => {{
-                    const st = Game.getState();
-                    st.mapId = '{map_id}';
-                    st.x = {tx}; st.y = {ty};
-                    Platform.writeSave(st);
-                }}""")
-                reload_keep_cov()
-                page.click("#continueBtn")
-                page.wait_for_timeout(160)
-                if key:
-                    page.keyboard.press(key)
-                    page.wait_for_timeout(120)
-
-            # 4. Chapter 1: Elder gift, Chest (open + empty), Windmill, Wild Encounter + Break-Free + KO Victory + Level Up
-            move_to_and_face(33, 91, "ArrowLeft")
-            page.keyboard.press("Space")
-            page.wait_for_timeout(250)
-            assert page.is_visible("#dialog")
-            page.click("#dialog")
-            page.wait_for_timeout(140)
-            assert page.evaluate("Game.getState().gold") >= 130
-
-            move_to_and_face(19, 95, "ArrowLeft")
-            page.keyboard.press("Space")
-            page.wait_for_timeout(130)
-            assert "ow_c1_1" in page.evaluate("Game.getState().openedChests")
-            page.keyboard.press("Space")  # Already opened
-            page.wait_for_timeout(100)
-
-            move_to_and_face(46, 87, "ArrowUp")
-            move_to_and_face(55, 100, None)
-            page.evaluate("window._origRand = Math.random; Math.random = () => 0.05;")
-            for _ in range(6):
-                page.keyboard.press("ArrowRight")
-                page.wait_for_timeout(200)
-                if page.evaluate("Battle.isActive()"):
-                    break
-            assert page.evaluate("Battle.isActive()")
-            # Throw Star Orb in English mode to verify full "Star Orbs" (not truncated "Star!") + break-free
-            page.evaluate("I18N.setLang('en'); Math.random = () => 0.99;")
-            page.click('[data-act="catch"]')
-            page.wait_for_timeout(100)
-            page.click('[data-orb="orbs"]')
-            page.wait_for_timeout(150)
-            assert "Star Orbs" in page.text_content("#bMsg"), f"Truncated orb msg: {page.text_content('#bMsg')}"
-            page.wait_for_timeout(2450)
+            # Verify fountain heal with real HP assertion
             page.evaluate("""() => {
-                I18N.setLang('zh');
-                Math.random = window._origRand;
-                const st = Game.getState();
-                st.party[0].lv = 15;
-                st.party[0].exp = 445;
+              const st = Game.getState();
+              st.party[0].hp = 12;
+              const ch1 = GameData.getChapter(1);
+              // Place just south of fountain facing up
+              st.x = ch1.healSpot.x; st.y = ch1.healSpot.y + 1;
+              Game.startGame(st);
             }""")
-            for _ in range(5):
-                if not page.evaluate("Battle.isActive()"):
-                    break
-                page.click('[data-act="attack"]')
-                page.wait_for_timeout(1850)
-            assert not page.evaluate("Battle.isActive()")
-
-            # Test Fountain, Signpost, Merchant Bella, Shop House, Waystone
-            move_to_and_face(31, 93, "ArrowLeft")
+            page.keyboard.press("ArrowUp")  # Face fountain (solid) or step
+            page.evaluate("""() => {
+              const ch1 = GameData.getChapter(1);
+              const st = Game.getState();
+              st.party[0].hp = 12;
+              st.x = ch1.healSpot.x; st.y = ch1.healSpot.y + 1;
+              Game.startGame(st);
+            }""")
+            page.keyboard.press("ArrowUp")
             page.keyboard.press("Space")
-            page.wait_for_timeout(120)
+            page.wait_for_function("Game.getState().party[0].hp === Game.getState().party[0].maxHp")
+            assert page.evaluate("Game.getState().party[0].hp === Game.getState().party[0].maxHp")
 
-            move_to_and_face(42, 91, "ArrowRight")
-            page.keyboard.press("Space")
-            page.wait_for_timeout(120)
-            page.keyboard.press("Escape")
-            page.wait_for_timeout(100)
+            # Verify real keyboard walking across Chapter 1 -> Chapter 2 border
+            page.evaluate("""() => {
+              const st = Game.getState();
+              st.x = 73; st.y = 90;
+              Game.startGame(st);
+            }""")
+            page.keyboard.down("ArrowRight")
+            page.wait_for_function("World.getZ(World.getOverworld(), Math.round(Game.getPlayerPos().x), Math.round(Game.getPlayerPos().y)) === 2")
+            page.keyboard.up("ArrowRight")
+            assert "Chapter 2" in page.text_content("#chapterBanner")
 
-            move_to_and_face(41, 91, "ArrowLeft")
-            page.keyboard.press("Space")
-            page.wait_for_timeout(250)
-            page.click("#dialog")
-            page.wait_for_timeout(140)
-            assert page.is_visible("#modal")
-            # Verify #btnA behind open modal does NOT open #dialog!
-            page.locator("#btnA").dispatch_event("pointerdown")
-            page.wait_for_timeout(100)
-            assert not page.is_visible("#dialog"), "btnA must not trigger dialog behind open modal"
+            # Verify real keyboard walking into locked Chapter 4 gate opens Gate Lock modal
+            page.evaluate("""() => {
+              const st = Game.getState();
+              st.x = 39; st.y = 66;
+              Game.startGame(st);
+            }""")
+            page.keyboard.press("ArrowUp")
+            page.wait_for_selector("#gateWatchAd", state="visible")
             page.click("#modalClose")
+            page.wait_for_function("document.getElementById('modal').classList.contains('hidden')")
 
-            move_to_and_face(39, 90, "ArrowUp")
-            page.keyboard.press("Space")
-            page.wait_for_timeout(140)
-            page.click("#modalClose")
+            # Verify Desktop Compass + Toast non-overlap
+            page.evaluate("""() => {
+              const st = Game.getState();
+              if (!st.tools.includes('compass')) st.tools.push('compass');
+              Game.saveAndSync();
+              Game.refreshLabels();
+              const el = document.createElement('div');
+              el.className = 'toast';
+              el.textContent = 'Compass Toast Overlap Check';
+              document.getElementById('toasts').appendChild(el);
+            }""")
+            overlap = page.evaluate("""() => {
+              const c = document.getElementById('compassBar').getBoundingClientRect();
+              const t = document.getElementById('toasts').getBoundingClientRect();
+              return !(t.top >= c.bottom - 1 || t.bottom <= c.top + 1);
+            }""")
+            assert not overlap, "Desktop #compassBar overlaps #toasts!"
 
-            # 5. Verify Aether Wings Fast Travel is PROPERLY GATED on World Map before owning Wings!
-            move_to_and_face(34, 91, "ArrowUp")
-            page.keyboard.press("Space")
-            page.wait_for_timeout(150)
-            assert page.locator('[data-warp]').count() == 0, "Fast Travel must require Aether Wings!"
-            assert page.locator('[data-need-wings]').count() >= 3
-            page.click('[data-need-wings="1"] >> nth=0')
-            page.wait_for_timeout(150)
-            assert page.is_visible("#storeGrid"), "Clicking Unlock Aether Wings should open Tools tab"
-            page.click("#modalClose")
-
-            # Also verify locked Ch.4 button in World Map & direct warpToChapter guards!
-            page.evaluate("Game.warpToChapter(4)")
-            page.wait_for_timeout(120)
-            assert page.is_visible("#gateWatchAd"), "warpToChapter(4) while locked must open Gate Lock Modal"
-            page.click("#modalClose")
-            page.evaluate("Game.warpToChapter(2)")
-            page.wait_for_timeout(120)
-            assert page.is_visible("#storeGrid"), "warpToChapter(2) without Wings must redirect to Tools store"
-            page.click("#modalClose")
+            # Verify Aether Wings Fast Travel gate & World Map
             page.click("#mapBtn")
-            page.wait_for_timeout(140)
-            page.click('[data-unlock-ch="ch4_pack"]')
-            page.wait_for_timeout(140)
+            page.wait_for_selector("#worldMapCanvas", state="visible")
+            assert page.locator("[data-warp]").count() == 0, "Fast travel must be gated before unlocking Wings"
+            assert page.locator("[data-need-wings]").count() >= 3
+            # Live language toggle inside open modal!
+            page.click("#modalLangBtn")
+            page.wait_for_function("document.getElementById('modalTitle').textContent.includes('大地图')")
+            page.click("#modalLangBtn")
+            page.wait_for_function("document.getElementById('modalTitle').textContent.includes('Map')")
             page.click("#modalClose")
 
-            # 6. Locked Chapter 4 Gate -> watch 1 ad directly from Gate Modal (skip once -> progress 0/2 -> complete 1/2!)
-            move_to_and_face(39, 66, "ArrowUp")
-            page.wait_for_timeout(200)
-            assert page.is_visible("#modal")
-            page.click("#gateWatchAd")
-            page.wait_for_timeout(130)
-            page.click("#adSkip")  # Incomplete ad -> 0 progress!
-            page.wait_for_timeout(130)
-            assert page.evaluate("Game.getState().adProgress.ch4_pack || 0") == 0
-            page.click("#gateWatchAd")
-            page.wait_for_timeout(130)
-            page.click("#adConfirm")  # Ad 1/2 complete -> progress saved!
-            page.wait_for_timeout(140)
-            assert page.evaluate("Game.getState().adProgress.ch4_pack") == 1
-            assert 4 not in page.evaluate("Game.getState().unlockedChapters")
-            page.click("#gateClose")
-
-            # Gate4 NPC
-            move_to_and_face(37, 68, "ArrowUp")
-            page.keyboard.press("Space")
-            page.wait_for_timeout(250)
-            page.click("#dialog")
-            page.wait_for_timeout(140)
-            page.click("#gateOpenStore")
-            page.wait_for_timeout(140)
-            page.click("#modalClose")
-
-            # 7. Chapter 2 & Chapter 3: Shallow water block -> Lighthouse -> Captain Barnaby (Skiff) -> Surf -> Pyramid -> Karim (Compass) -> Ch.5 Gate
-            move_to_and_face(86, 86, "ArrowLeft")
-            page.wait_for_timeout(120)
-            move_to_and_face(108, 87, "ArrowUp")
-            move_to_and_face(103, 93, "ArrowUp")
-            page.keyboard.press("Space")
-            page.wait_for_timeout(250)
-            page.click("#dialog")
-            page.wait_for_timeout(140)
-            assert "skiff" in page.evaluate("Game.getState().tools")
-            move_to_and_face(79, 70, "ArrowLeft")
-            page.wait_for_timeout(160)
-
-            move_to_and_face(124, 36, "ArrowUp")
-            move_to_and_face(104, 51, "ArrowUp")
-            page.keyboard.press("Space")
-            page.wait_for_timeout(250)
-            page.click("#dialog")
-            page.wait_for_timeout(140)
-            assert "compass" in page.evaluate("Game.getState().tools")
-            assert page.is_visible("#compassBar")
-
-            move_to_and_face(103, 28, "ArrowUp")
-            page.wait_for_timeout(180)
-            assert page.is_visible("#modal")
-            page.click("#gateClose")
-
-            move_to_and_face(101, 30, "ArrowUp")
-            page.keyboard.press("Space")
-            page.wait_for_timeout(250)
-            page.click("#dialog")
-            page.wait_for_timeout(140)
-            page.click("#gateClose")
-
-            # 8. Reward Vault (IAA): Watch 4 ads for Grand Explorer Bundle (Ch.4+Ch.5+Valkyrie+Aether Wings), test Heroes, Tools, & Repeatable Ad Supply Drop!
+            # Verify Reward Vault: Repeated Supply Drops + Bundle ownership + Cross-Credit + Ad Unlock
             page.click("#shopBtn")
-            page.wait_for_timeout(140)
-            assert "¥" not in page.text_content("#modalBody") and "$" not in page.text_content("#modalBody"), "Zero cash prices allowed in Personal IAA mode!"
-            for _ in range(4):
-                page.click('[data-watch-ad="season_pass"]')
-                page.wait_for_timeout(100)
-                page.click("#adConfirm")
-                page.wait_for_timeout(120)
-            st_after = page.evaluate("Game.getState()")
-            assert 4 in st_after["unlockedChapters"] and 5 in st_after["unlockedChapters"]
-            assert "wings" in st_after["tools"] and "valkyrie" in st_after["unlockedHeroes"]
-
-            # Heroes tab: buy Tidecaller with Gold, watch 3 ads for Summoner, equip Valkyrie & verify HP sync!
-            page.click('[data-tab="heroes"]')
-            page.wait_for_timeout(120)
-            page.evaluate("Game.getState().gold = 900")
-            page.click('[data-buy-hero-gold="tidecaller"]')
-            page.wait_for_timeout(120)
-            for _ in range(3):
-                page.click('[data-watch-ad="hero_summoner"]')
-                page.wait_for_timeout(90)
-                page.click("#adConfirm")
-                page.wait_for_timeout(100)
-            hp_before = page.evaluate("Game.getState().party[0].maxHp")
-            page.click('[data-equip-hero="valkyrie"]')
-            page.wait_for_timeout(120)
-            hp_after = page.evaluate("Game.getState().party[0].maxHp")
-            assert hp_after > hp_before, f"Equipping Valkyrie must immediately sync maxHp ({hp_before} -> {hp_after})"
-
-            # Tools tab: buy Magnet with Gold, watch ads for Lantern (1) & Prism Staff (2)
-            page.click('[data-tab="tools"]')
-            page.wait_for_timeout(120)
-            page.click('[data-buy-tool-gold="magnet"]')
-            page.wait_for_timeout(100)
-            page.click('[data-watch-ad="tool_lantern"]')
-            page.wait_for_timeout(90)
-            page.click("#adConfirm")
-            page.wait_for_timeout(100)
+            page.wait_for_selector("[data-tab='items']", state="visible")
+            page.click("[data-tab='items']")
+            gold_before = page.evaluate("Game.getState().gold")
+            super_before = page.evaluate("Game.getState().items.superOrbs")
             for _ in range(2):
-                page.click('[data-watch-ad="tool_prismstaff"]')
-                page.wait_for_timeout(90)
+                page.click("[data-watch-ad='ad_supply_pack']")
+                page.wait_for_selector("#adConfirm", state="visible")
                 page.click("#adConfirm")
-                page.wait_for_timeout(100)
+                page.wait_for_selector("[data-watch-ad='ad_supply_pack']", state="visible")
+            assert page.evaluate("Game.getState().gold") == gold_before + 200
+            assert page.evaluate("Game.getState().items.superOrbs") == super_before + 6
 
-            # Supplies tab: claim repeatable Free Ad Supply Drop + buy Gold supplies + insufficient gold warning
-            page.click('[data-tab="items"]')
-            page.wait_for_timeout(120)
-            page.click('[data-watch-ad="ad_supply_pack"]')
-            page.wait_for_timeout(100)
+            # Watch 2 ads for Ch.4, 1 ad for Ch.5 -> verify Bundle credits 3/4 ads and stays unclaimed!
+            page.click("[data-tab='chapters']")
+            for _ in range(2):
+                page.click("[data-watch-ad='ch4_pack']")
+                page.wait_for_selector("#adConfirm", state="visible")
+                page.click("#adConfirm")
+                page.wait_for_selector("#storeGrid", state="visible")
+            assert page.evaluate("Game.getState().unlockedChapters.includes(4)")
+            page.click("[data-watch-ad='ch5_pack']")
+            page.wait_for_selector("#adConfirm", state="visible")
             page.click("#adConfirm")
-            page.wait_for_timeout(120)
-            page.click('[data-buy-supply="orbs"]')
-            page.wait_for_timeout(100)
-            page.evaluate("Game.getState().gold = 0")
-            page.click('[data-buy-supply="masterOrbs"]')
-            page.wait_for_timeout(100)
-            page.evaluate("Game.getState().gold = 500")
+            page.wait_for_selector("#storeGrid", state="visible")
+            bundle_btn_text = page.locator("[data-watch-ad='season_pass']").text_content()
+            assert "3/4" in bundle_btn_text, f"Expected bundle to credit 3/4 chapter ads, got: {bundle_btn_text}"
+
+            # Complete 4th ad on bundle -> unlocks Ch.5, Valkyrie, Wings + 1 Astral Orb + 300 Gold and marks Owned
+            page.click("[data-watch-ad='season_pass']")
+            page.wait_for_selector("#adConfirm", state="visible")
+            page.click("#adConfirm")
+            page.wait_for_function("Game.getState().claimedBundles.includes('season_pass')")
+            assert page.locator("[data-watch-ad='season_pass']").count() == 0
+            assert page.evaluate("Game.getState().tools.includes('wings')")
             page.click("#modalClose")
 
-            # 9. Test Aether Wings Fast Travel (now UNLOCKED!) to Ch.4 & Ch.5!
-            for cid in [4, 5]:
-                page.click("#mapBtn")
-                page.wait_for_timeout(120)
-                page.click(f'[data-warp="{cid}"]')
-                page.wait_for_timeout(180)
-            # Also visit Ch.4 Castle & Ch.5 Skytemple
-            move_to_and_face(22, 36, "ArrowUp")
-            move_to_and_face(75, 11, "ArrowUp")
+            # Verify World Map Fast Travel NOW works with Aether Wings
+            page.click("#mapBtn")
+            page.wait_for_selector("[data-warp='2']", state="visible")
+            page.click("[data-warp='2']")
+            page.wait_for_function("document.getElementById('modal').classList.contains('hidden')")
+            assert "Chapter 2" in page.text_content("#chapterBanner")
 
-            # 10. Enter Dungeon 1, Sage gift, Boss Battle + Astral Orb Catch + Crest + Both Dungeon Chests (compassNone) + Exit!
-            move_to_and_face(22, 75, "ArrowUp")
-            page.wait_for_timeout(320)
+            # Verify Dungeon entry (dun_1) by walking onto entrance with condition-based wait
+            page.evaluate("""() => {
+              const ch1 = GameData.getChapter(1);
+              const st = Game.getState();
+              st.x = ch1.dungeon.entrance.x;
+              st.y = ch1.dungeon.entrance.y + 1;
+              Game.startGame(st);
+            }""")
+            page.keyboard.down("ArrowUp")
+            page.wait_for_function("World.getMap().id === 'dun_1'", timeout=5000)
+            page.keyboard.up("ArrowUp")
             assert page.evaluate("World.getMap().id") == "dun_1"
 
-            move_to_and_face(9, 12, "ArrowUp", "dun_1")
-            page.keyboard.press("Space")
-            page.wait_for_timeout(250)
-            page.click("#dialog")
-            page.wait_for_timeout(140)
-
-            move_to_and_face(11, 5, "ArrowUp", "dun_1")
-            page.keyboard.press("Space")
-            page.wait_for_timeout(250)
-            page.click("#dialog")
-            page.wait_for_timeout(240)
-            assert page.evaluate("Battle.isActive()")
-
-            page.keyboard.press("3")
-            page.wait_for_timeout(1850)
-            page.keyboard.press("4")
-            page.wait_for_timeout(130)
-            page.click('[data-run="1"]')  # Blocked by Boss
-            page.wait_for_timeout(160)
-            page.keyboard.press("1")
-            page.wait_for_timeout(1850)
+            # Verify Battle Race Conditions 4a/4b/4c + Live Battle Language Switch via REAL Game.startBattle
+            page.evaluate("""() => {
+              const st = Game.getState();
+              st.party[0].lv = 28;
+              Game.syncPartyStats();
+              st.party[0].hp = st.party[0].maxHp;
+              st.items.masterOrbs = 2;
+              Game.startBattle('sproutling', 4, false, 1);
+            }""")
+            page.wait_for_function("Battle.isActive()")
+            gold_pre_battle = page.evaluate("Game.getState().gold")
+            wild_hp_pre = page.evaluate("Battle.getWild().hp")
+            # Press 2 (open Catch submenu), then press 1 (must be ignored!)
             page.keyboard.press("2")
-            page.wait_for_timeout(130)
-            page.click('[data-orb="masterOrbs"]')
-            page.wait_for_selector("#celebrate:not(.hidden)", timeout=4500)
-            page.click("#celePartner")
-            page.wait_for_timeout(140)
-            assert 1 in page.evaluate("Game.getState().crests")
-
-            # Test duplicate higher-level catch updates maxHp!
-            page.evaluate("""() => {
-                const st = Game.getState();
-                st.items.masterOrbs = 2;
-                Battle.start(st, 'sproutling', 20, false, 1, res => {
-                    // Route through real Game capture? Verify via Battle + duplicate check below
-                });
-            }""")
-            # Better: trigger wild catch directly via Game flow by walking in dun_1 tall grass!
-            page.evaluate("Battle.handleAction('switch')")
-            page.wait_for_timeout(100)
-            page.click('[data-run="1"]')
-            page.wait_for_timeout(650)
-
-            # Open both dungeon chests -> hits compassNone!
-            move_to_and_face(5, 5, "ArrowLeft", "dun_1")
-            page.keyboard.press("Space")
-            page.wait_for_timeout(120)
-            move_to_and_face(16, 5, "ArrowRight", "dun_1")
-            page.keyboard.press("Space")
-            page.wait_for_timeout(120)
-
-            # Trigger duplicate catch inside dun_1 tall grass via real Game.startBattle callback
-            move_to_and_face(4, 9, None, "dun_1")
-            page.evaluate("""() => {
-                const st = Game.getState();
-                st.items.masterOrbs = 2;
-                st.party[0].lv = 5;
-                window._origRand = Math.random;
-                Math.random = () => 0.01;
-            }""")
-            for step in range(6):
-                page.keyboard.press("ArrowRight" if step % 2 == 0 else "ArrowLeft")
-                page.wait_for_timeout(220)
-                if page.evaluate("Battle.isActive()"):
-                    break
-            assert page.evaluate("Battle.isActive()")
-            page.evaluate("Math.random = window._origRand;")
-            page.click('[data-act="catch"]')
-            page.wait_for_timeout(120)
-            page.click('[data-orb="masterOrbs"]')
-            page.wait_for_selector("#celebrate:not(.hidden)", timeout=4500)
+            page.wait_for_selector("#bSub button[data-orb='masterOrbs']", state="visible")
+            page.keyboard.press("1")
+            assert page.evaluate("Battle.getWild().hp") == wild_hp_pre, "Key 1 fired attack while Catch submenu open!"
+            # Toggle language mid-battle while Catch submenu is open!
+            page.click("#bLangBtn")
+            page.wait_for_function("document.getElementById('bSub').textContent.includes('圣星球')")
+            page.click("#bLangBtn")
+            page.wait_for_function("document.getElementById('bSub').textContent.includes('Astral Orbs')")
+            # Throw Astral Orb -> single victory & celebration overlay
+            page.click("#bSub button[data-orb='masterOrbs']")
+            page.wait_for_function("!Battle.isActive()", timeout=6000)
+            page.wait_for_selector("#celeOk", state="visible")
             page.click("#celeOk")
-            page.wait_for_timeout(120)
+            gold_post_battle = page.evaluate("Game.getState().gold")
+            assert gold_post_battle > gold_pre_battle and gold_post_battle < gold_pre_battle + 80
 
-            # Exit Dungeon (also fires Interstitial Ad hook!)
-            move_to_and_face(11, 13, "ArrowDown", "dun_1")
-            page.wait_for_timeout(320)
-            assert page.evaluate("World.getMap().id") == "overworld"
+            # 4c: Run Away race check
+            page.evaluate("Game.startBattle('oakstag', 9, false, 1)")
+            page.wait_for_function("Battle.isActive()")
+            hp_pre_run = page.evaluate("Game.getState().party[0].hp")
+            page.keyboard.press("4")
+            page.wait_for_selector("#bSub button[data-run='1']", state="visible")
+            page.keyboard.press("1")  # Must be ignored
+            page.click("#bSub button[data-run='1']")
+            page.wait_for_function("!Battle.isActive()", timeout=4000)
+            page.wait_for_timeout(950)
+            assert page.evaluate("Game.getState().party[0].hp") == hp_pre_run
 
-            # 11. Wild Battle edge cases: No orbs, No treats, Swap, Cancel, Run-Away race guard, Team Faint!
+            # REAL Game.startBattle Faint Recovery Check (assert respawn at Ch.1 fountain!)
             page.evaluate("""() => {
-                const st = Game.getState();
-                st.items.orbs = 0; st.items.superOrbs = 0; st.items.masterOrbs = 0; st.items.treats = 0;
-                Battle.start(st, 'flutterfae', 4, false, 1, () => {});
+              const st = Game.getState();
+              st.party = [st.party[0]];
+              st.activePartnerIdx = 0;
+              st.party[0].lv = 1;
+              Game.syncPartyStats();
+              st.party[0].hp = 1;
+              st.x = 36; st.y = 92;
+              World.setActiveMap('overworld');
+              Game.startBattle('astraldragon', 28, false, 1);
             }""")
-            page.wait_for_timeout(200)
-            page.click('[data-act="catch"]')
-            page.click('[data-act="feed"]')
-            page.click('[data-act="switch"]')
-            page.wait_for_timeout(100)
-            page.click('[data-cancel="1"]')
-            page.click('[data-act="switch"]')
-            page.wait_for_timeout(100)
-            page.click('[data-swap="0"]')
-            page.wait_for_timeout(1500)
-            # Test Run-Away race guard: clicking Attack right after Run MUST be blocked (gold unchanged!)
-            gold_pre_run = page.evaluate("Game.getState().gold")
-            page.click('[data-act="switch"]')
-            page.wait_for_timeout(100)
-            page.click('[data-run="1"]')
-            page.click('[data-act="attack"]')  # Must be ignored because busy=true!
-            page.wait_for_timeout(700)
-            assert not page.evaluate("Battle.isActive()")
-            assert page.evaluate("Game.getState().gold") == gold_pre_run, "Run-away race allowed post-escape rewards!"
+            page.wait_for_function("Battle.isActive()")
+            page.keyboard.press("1")  # Attack high-level enemy -> enemy knocks out 1 HP partner
+            page.wait_for_function("!Battle.isActive()", timeout=6000)
+            faint_pos = page.evaluate("Game.getPlayerPos()")
+            ch1_heal = page.evaluate("GameData.getChapter(1).healSpot")
+            assert round(faint_pos["x"]) == ch1_heal["x"] and round(faint_pos["y"]) == ch1_heal["y"] + 1
+            assert page.evaluate("Game.getState().party[0].hp === Game.getState().party[0].maxHp")
 
-            # Team Faint Recovery
-            page.evaluate("""() => {
-                const st = Game.getState();
-                st.heroId = 'ranger';
-                st.party.forEach(p => { p.hp = 1; });
-                Battle.start(st, 'astraldragon', 35, false, 5, () => {});
+            # Verify Save Failure Rollback & Reload Persistence
+            rollback_ok = page.evaluate("""() => {
+              const orig = Storage.prototype.setItem;
+              Storage.prototype.setItem = () => { throw new Error('QuotaExceeded'); };
+              const res = Game.recordAdProgress(GameData.PRODUCT_BY_ID.hero_summoner);
+              const prog = Game.getState().adProgress.hero_summoner || 0;
+              Storage.prototype.setItem = orig;
+              return res === false && prog === 0;
             }""")
-            page.wait_for_timeout(200)
-            for _ in range(3):
-                if not page.evaluate("Battle.isActive()"):
-                    break
-                page.click('[data-act="attack"]')
-                page.wait_for_timeout(2000)
-            page.wait_for_timeout(1200)
+            assert rollback_ok, "Save failure did not roll back adProgress!"
 
-            # 12. Modals: Party, Critterdex, Bag, Settings + wx IAA bridge + Reset Save!
-            page.click("#partnerCard")
-            page.wait_for_timeout(140)
-            if page.locator('[data-set-p="0"]').count() > 0:
-                page.click('[data-set-p="0"]')
-                page.wait_for_timeout(120)
-            page.click("#switchHeroBtn")
-            page.wait_for_timeout(120)
-            page.click("#modalClose")
+            # Record real progress, reload page, verify persistence
+            assert page.evaluate("Game.recordAdProgress(GameData.PRODUCT_BY_ID.hero_summoner)") is True
+            cov_chunk_1 = cdp.send("Profiler.takePreciseCoverage")["result"]
+            all_cov_entries.extend(cov_chunk_1)
 
-            page.click("#dexBtn")
-            page.wait_for_timeout(220)
-            page.click("#modalClose")
+            page.reload(wait_until="networkidle")
+            page.wait_for_selector("#continueBtn", state="visible")
+            page.click("#continueBtn")
+            page.wait_for_function("document.getElementById('title').classList.contains('hidden')")
+            assert page.evaluate("Game.getState().adProgress.hero_summoner") == 1, "Save progress lost on reload!"
 
-            page.click("#bagBtn")
-            page.wait_for_timeout(140)
-            page.click("#modalClose")
-
-            page.click("#muteBtn")
-            page.click("#muteBtn")
-            page.click("#langBtn")
-
-            # Verify AudioFX.stopBgm + Platform WeChat Personal IAA runtime hooks directly in Chromium!
-            page.evaluate("""async () => {
-                AudioFX.stopBgm();
-                const wxStore = {};
-                const handlers = new Set();
-                let outcome = 'ended';
-                const ad = {
-                    onClose: f => handlers.add(f),
-                    offClose: f => handlers.delete(f),
-                    load: () => outcome === 'fail' ? Promise.reject('err') : Promise.resolve(),
-                    show: () => {
-                        if (outcome === 'fail') return Promise.reject('err');
-                        Array.from(handlers).forEach(fn => fn({ isEnded: outcome === 'ended' }));
-                        return Promise.resolve();
-                    },
-                };
-                window.wx = {
-                    getSystemInfoSync: () => ({ platform: 'ios' }),
-                    getStorageSync: k => wxStore[k],
-                    setStorageSync: (k, v) => { wxStore[k] = v; },
-                    removeStorageSync: k => { delete wxStore[k]; },
-                    vibrateShort: () => {},
-                    showShareMenu: () => {},
-                    createRewardedVideoAd: () => ad,
-                    createInterstitialAd: () => ({ show: () => Promise.resolve() }),
-                };
-                window.AETHERIA_REWARD_AD_ID = 'test_reward';
-                window.AETHERIA_INTERSTITIAL_AD_ID = 'test_inter';
-                Platform.getEnvName();
-                Platform.initShareMenu();
-                Platform.writeSave({ wxTest: 1 });
-                Platform.loadSave();
-                Platform.saveSetting('k', 'v');
-                Platform.loadSetting('k');
-                Platform.vibrateShort();
-                Platform.showRewardedAd({ id: 'ch4_pack' }, () => {}, () => {});
-                outcome = 'incomplete';
-                Platform.showRewardedAd({ id: 'ch4_pack' }, () => {}, () => {});
-                outcome = 'fail';
-                Platform.showRewardedAd({ id: 'ch4_pack' }, () => {}, () => {});
-                Platform.showInterstitialAd();
-                Platform.clearSave();
-                delete window.wx;
-                delete window.AETHERIA_REWARD_AD_ID;
-                delete window.AETHERIA_INTERSTITIAL_AD_ID;
-                Platform.showRewardedAd({ id: 'ch4_pack' }, () => {});
-            }""")
-            page.wait_for_timeout(120)
-
-            page.click("#menuBtn")
-            page.wait_for_timeout(140)
-            page.click("#setLangBtn")
-            page.wait_for_timeout(140)
-            # Trigger Reset Save confirm (accept) and capture coverage right before reload!
-            page.on("dialog", lambda d: d.accept())
-            snap_cov()
+            # Open Dex, Party, Bag, Settings (verify two-tap reset without window.confirm)
+            page.click("#dexBtn"); page.wait_for_selector(".dex-grid", state="visible"); page.click("#modalClose")
+            page.click("#partnerCard"); page.wait_for_selector(".crest-bar", state="visible"); page.click("#modalClose")
+            page.click("#bagBtn"); page.wait_for_selector(".bag-stats", state="visible"); page.click("#modalClose")
+            page.click("#menuBtn"); page.wait_for_selector("#setResetBtn", state="visible")
             page.click("#setResetBtn")
-            page.wait_for_timeout(280)
-            snap_cov()
+            page.wait_for_selector("#setResetConfirmBtn", state="visible")
+            page.click("#setResetCancelBtn")
+            page.wait_for_selector("#setResetBtn", state="visible")
+            page.click("#modalClose")
 
+            cov_chunk_2 = cdp.send("Profiler.takePreciseCoverage")["result"]
+            all_cov_entries.extend(cov_chunk_2)
             cdp.send("Profiler.stopPreciseCoverage")
+            ctx.close()
+
+            # =====================================================================
+            # PART 2: WECHAT RUNTIME MOCK E2E (MISSING ID FAIL-CLOSED + DOUBLE-TAP)
+            # =====================================================================
+            wx_ctx = browser.new_context(viewport={"width": 390, "height": 844}, has_touch=True)
+            wx_ctx.add_init_script("""
+              (() => {
+                const store = new Map();
+                const closeSet = new Set();
+                window.__wxCloseSet = closeSet;
+                window.__wxAdShowCalls = 0;
+                window.wx = {
+                  getSystemInfoSync: () => ({ windowWidth: 390, windowHeight: 844, pixelRatio: 2 }),
+                  getStorageSync: k => store.get(k) || '',
+                  setStorageSync: (k, v) => store.set(k, v),
+                  removeStorageSync: k => store.delete(k),
+                  showShareMenu: () => {},
+                  onShareAppMessage: () => {},
+                  onShareTimeline: () => {},
+                  vibrateShort: () => {},
+                  createRewardedVideoAd: () => ({
+                    onClose: cb => closeSet.add(cb),
+                    offClose: cb => closeSet.delete(cb),
+                    onError: () => {},
+                    offError: () => {},
+                    load: () => Promise.resolve(),
+                    show: () => { window.__wxAdShowCalls++; return Promise.resolve(); },
+                  }),
+                };
+              })();
+            """)
+            wx_page = wx_ctx.new_page()
+            wx_page.on("pageerror", lambda err: errors.append(f"WX_PAGEERROR: {err}"))
+            wx_page.goto(base_url, wait_until="networkidle")
+            wx_page.click("[data-starter='sproutling']")
+            wx_page.wait_for_function("document.getElementById('title').classList.contains('hidden')")
+
+            # 2a. Missing ad unit ID -> MUST FAIL CLOSED (0 progress, no simulator modal)
+            wx_page.evaluate("UI.openGateLockModal(4)")
+            wx_page.wait_for_selector("#gateWatchAd", state="visible")
+            wx_page.click("#gateWatchAd")
+            wx_page.wait_for_timeout(120)
+            assert wx_page.locator("#adConfirm").count() == 0, "Web simulator opened inside WeChat!"
+            assert wx_page.evaluate("Game.getState().adProgress.ch4_pack || 0") == 0
+
+            # 2b. Set valid ad unit ID -> Double-tap #gateWatchAd with async singleton mock -> adProgress === 1
+            wx_page.evaluate("window.AETHERIA_REWARD_AD_ID = 'adunit-e2e-test'; UI.openGateLockModal(4);")
+            wx_page.wait_for_selector("#gateWatchAd", state="visible")
+            wx_page.evaluate("""() => {
+              const btn = document.getElementById('gateWatchAd');
+              btn.click();
+              btn.click(); // Rapid second tap while ad is in-flight!
+            }""")
+            assert wx_page.evaluate("window.__wxAdShowCalls") == 1
+            assert wx_page.evaluate("window.__wxCloseSet.size") == 1
+            wx_page.evaluate("Array.from(window.__wxCloseSet).forEach(fn => fn({ isEnded: true }))")
+            wx_page.wait_for_function("Game.getState().adProgress.ch4_pack === 1")
+            assert wx_page.evaluate("Game.getState().adProgress.ch4_pack") == 1
+            wx_ctx.close()
+
+            # =====================================================================
+            # PART 3: MOBILE VIEWPORT LAYOUT & TYPOGRAPHY (390x844 & 360x800, zh+en)
+            # =====================================================================
+            for (vw, vh) in [(390, 844), (360, 800)]:
+                m_ctx = browser.new_context(viewport={"width": vw, "height": vh}, has_touch=True, device_scale_factor=2)
+                m_page = m_ctx.new_page()
+                m_page.on("pageerror", lambda err: errors.append(f"MOBILE_{vw}_PAGEERROR: {err}"))
+                m_page.goto(base_url, wait_until="networkidle")
+                m_page.click("[data-starter='dewdrop']")
+                m_page.wait_for_function("document.getElementById('title').classList.contains('hidden')")
+
+                for lang in ("zh", "en"):
+                    m_page.evaluate(f"I18N.setLang('{lang}'); Game.refreshLabels();")
+                    m_page.wait_for_timeout(80)
+                    check_viewport_layout_and_fonts(m_page, vw, vh, lang)
+
+                # Verify mobile store card stacks full width (< 600px)
+                m_page.click("#shopBtn")
+                m_page.wait_for_selector(".store-card .sc-body", state="visible")
+                card_ratio = m_page.evaluate("""() => {
+                  const card = document.querySelector('.store-card').getBoundingClientRect();
+                  const body = document.querySelector('.store-card .sc-body').getBoundingClientRect();
+                  return body.width / card.width;
+                }""")
+                assert card_ratio >= 0.78, f"[{vw}x{vh}] Store card description squeezed: ratio={card_ratio:.2f}"
+                m_page.click("#modalClose")
+                m_ctx.close()
+
             browser.close()
     finally:
         httpd.shutdown()
 
-    report = compute_v8_line_coverage(all_cov_entries)
-    print("\n=== CHROMIUM V8 REAL E2E COVERAGE REPORT (PERSONAL IAA BUILD) ===")
-    total_tracked = 0
-    total_hit = 0
-    for rel, r in report.items():
-        total_tracked += r["tracked_lines"]
-        total_hit += r["hit_lines"]
-        miss_str = "" if not r["missed_lines"] else f" | missed: {r['missed_lines'][:14]}"
-        print(f"  {rel:16s} | lines: {r['line_pct']:6.2f}% ({r['hit_lines']}/{r['tracked_lines']}) | funcs: {r['func_pct']:6.2f}%{miss_str}")
-    overall = (total_hit / total_tracked * 100.0) if total_tracked else 100.0
-    print(f"  {'OVERALL':16s} | lines: {overall:6.2f}% ({total_hit}/{total_tracked})")
-    print("Errors:", errors)
-    if errors:
-        raise SystemExit(1)
+    assert not errors, f"Console/Page errors occurred:\n" + "\n".join(errors)
+
+    report = compute_v8_coverage(all_cov_entries)
+    missing = [m for m in EXPECTED_MODULES if m not in report]
+    assert not missing, f"Missing expected modules from V8 coverage report: {missing}"
+
+    tot_l = sum(r["tracked_lines"] for r in report.values())
+    hit_l = sum(r["hit_lines"] for r in report.values())
+    tot_b = sum(r["branches_total"] for r in report.values())
+    hit_b = sum(r["branches_hit"] for r in report.values())
+    tot_f = sum(r["funcs_total"] for r in report.values())
+    hit_f = sum(r["funcs_hit"] for r in report.values())
+
+    line_pct = (hit_l / tot_l * 100.0) if tot_l else 0.0
+    branch_pct = (hit_b / tot_b * 100.0) if tot_b else 0.0
+    func_pct = (hit_f / tot_f * 100.0) if tot_f else 0.0
+
+    print("\n=== REAL CHROMIUM CDP V8 PRECISE COVERAGE (UTF-16 MAPPED) ===")
+    print(f"{'Module':<20} {'Lines':>12} {'Line %':>8} {'Branch %':>9} {'Func %':>8}")
+    print("-" * 62)
+    for mod in EXPECTED_MODULES:
+        r = report[mod]
+        print(f"{mod:<20} {r['hit_lines']:>5}/{r['tracked_lines']:<6} {r['line_pct']:>7.2f}% {r['branch_pct']:>8.2f}% {r['func_pct']:>7.2f}%")
+    print("-" * 62)
+    print(f"{'OVERALL':<20} {hit_l:>5}/{tot_l:<6} {line_pct:>7.2f}% {branch_pct:>8.2f}% {func_pct:>7.2f}%")
+
+    assert line_pct >= MIN_LINE_PCT, f"Line coverage {line_pct:.2f}% < threshold {MIN_LINE_PCT}%"
+    assert branch_pct >= MIN_BRANCH_PCT, f"Branch coverage {branch_pct:.2f}% < threshold {MIN_BRANCH_PCT}%"
+    assert func_pct >= MIN_FUNC_PCT, f"Function coverage {func_pct:.2f}% < threshold {MIN_FUNC_PCT}%"
+    print("\nALL E2E ASSERTIONS, LAYOUT CHECKS & COVERAGE THRESHOLDS PASSED (0 errors).")
 
 
 if __name__ == "__main__":

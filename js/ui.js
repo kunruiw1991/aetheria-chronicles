@@ -1,45 +1,128 @@
 'use strict';
 /* ==========================================================================
- * ui.js — Modals: Interactive World Map, Grand Store (Chapters/Heroes/Tools),
- * Critterdex, Party & Hero Switcher, Bag/Tools, Settings & Checkout Sheet
+ * ui.js — Modals: Interactive World Map, Reward Vault (Chapters/Heroes/Tools),
+ * Critterdex, Party & Hero Switcher, Bag/Tools, Settings & Ad Preview Sheet
  * ========================================================================== */
 const UI = (() => {
-  const D = GameData;
-  const $ = id => document.getElementById(id);
+  const getD = () => (typeof GameData !== 'undefined' ? GameData : globalThis.GameData);
+  const $ = id => (typeof document !== 'undefined' ? document.getElementById(id) : null);
 
   let gameRef = null;
   let storeTab = 'chapters';
+  let activeModal = null; // { type, arg }
+  let pendingAdCancel = null;
+  let resetConfirmStep = false;
 
   function bind(ref) {
     gameRef = ref;
-    $('modalClose').onclick = closeModal;
-    $('modal').onclick = e => { if (e.target === $('modal')) closeModal(); };
+    const closeBtn = $('modalClose');
+    if (closeBtn) closeBtn.onclick = closeModal;
+    const modalEl = $('modal');
+    if (modalEl) modalEl.onclick = e => { if (e.target === modalEl) closeModal(); };
+    const modalLangBtn = $('modalLangBtn');
+    if (modalLangBtn) {
+      modalLangBtn.onclick = () => {
+        I18N.toggleLang();
+        if (gameRef && gameRef.refreshLabels) gameRef.refreshLabels();
+      };
+    }
   }
 
-  function openModal(title, html, onReady) {
-    $('modalTitle').textContent = title;
-    $('modalBody').innerHTML = html;
-    $('modal').classList.remove('hidden');
+  function openModal(title, html, onReady, modalMeta) {
+    activeModal = modalMeta || null;
+    if (pendingAdCancel && (!modalMeta || modalMeta.type !== 'simAd')) {
+      const cancel = pendingAdCancel;
+      pendingAdCancel = null;
+      cancel('cancelled');
+    }
+    const titleEl = $('modalTitle');
+    const bodyEl = $('modalBody');
+    const modalEl = $('modal');
+    const langBtn = $('modalLangBtn');
+    if (titleEl) titleEl.textContent = title;
+    if (langBtn) langBtn.textContent = '🌐 ' + I18N.t('langLabel');
+    if (bodyEl) bodyEl.innerHTML = html;
+    if (modalEl) modalEl.classList.remove('hidden');
     AudioFX.sfx.open();
-    if (onReady) onReady($('modalBody'));
+    if (onReady && bodyEl) onReady(bodyEl);
   }
 
   function closeModal() {
-    $('modal').classList.add('hidden');
+    activeModal = null;
+    resetConfirmStep = false;
+    const modalEl = $('modal');
+    if (modalEl) modalEl.classList.add('hidden');
+    if (pendingAdCancel) {
+      const cancel = pendingAdCancel;
+      pendingAdCancel = null;
+      cancel('cancelled');
+    }
+  }
+
+  function refreshActiveModal() {
+    const modalEl = $('modal');
+    if (!activeModal || !modalEl || modalEl.classList.contains('hidden')) return;
+    const { type, arg } = activeModal;
+    if (type === 'worldMap') openWorldMap();
+    else if (type === 'store') openStore(storeTab);
+    else if (type === 'gate') openGateLockModal(arg);
+    else if (type === 'dex') openDex();
+    else if (type === 'party') openParty();
+    else if (type === 'bag') openBag();
+    else if (type === 'settings') openSettings();
+    else if (type === 'simAd' && arg) {
+      const { prod, onComplete, onSkip } = arg;
+      openSimulatedAdModal(prod, onComplete, onSkip);
+    }
+  }
+
+  /* ---------------- Bundle Ownership & Cross-Credited Ad Progress ---------------- */
+  function getEffectiveAdProgress(prod, st) {
+    if (!prod || prod.repeatable) return 0;
+    const prog = (st && st.adProgress) || {};
+    let total = prog[prod.id] || 0;
+    if (Array.isArray(prod.creditFrom)) {
+      prod.creditFrom.forEach(srcId => {
+        total += (prog[srcId] || 0);
+      });
+    }
+    return Math.min(prod.adCost || 1, total);
+  }
+
+  function isProductOwned(p, st) {
+    if (!p || p.repeatable) return false;
+    if (p.isBundle) {
+      return Array.isArray(st.claimedBundles) && st.claimedBundles.includes(p.id);
+    }
+    const g = p.grants || {};
+    const chOk = !g.chapters || g.chapters.every(cid => st.unlockedChapters.includes(cid));
+    const heroOk = !g.heroes || g.heroes.every(hid => st.unlockedHeroes.includes(hid));
+    const toolOk = !g.tools || g.tools.every(tid => st.tools.includes(tid));
+    return chOk && heroOk && toolOk;
+  }
+
+  function adBtnLabel(prod, st) {
+    if (Platform.isRewardedAdInFlight()) return I18N.t('storeAdLoading');
+    if (prod.repeatable || prod.adCost === 1) return I18N.t('storeWatchAdSingle');
+    const done = getEffectiveAdProgress(prod, st);
+    return I18N.t('storeWatchAd', { done, cost: prod.adCost });
   }
 
   /* ---------------- 1. Interactive World Map & Chapter Navigator ---------------- */
   function openWorldMap() {
+    const D = getD();
     const st = gameRef.getState();
     const hasWings = st.tools.includes('wings');
     const chCards = D.CHAPTERS.map(ch => {
       const unlocked = st.unlockedChapters.includes(ch.id);
       const cleared = st.crests.includes(ch.id);
+      const prod = ch.productId ? D.PRODUCT_BY_ID[ch.productId] : null;
+      const done = prod ? getEffectiveAdProgress(prod, st) : 0;
       const badge = ch.free
         ? `<span class="badge free">${I18N.t('chapterFree')}</span>`
         : unlocked
           ? `<span class="badge owned">${I18N.t('chapterUnlocked')}</span>`
-          : `<span class="badge paid">🎬 ${(st.adProgress && st.adProgress[ch.productId]) || 0}/${ch.adCost}</span>`;
+          : `<span class="badge paid">🎬 ${done}/${ch.adCost}</span>`;
       const actionBtn = !unlocked
         ? `<button class="sm-btn gold" data-unlock-ch="${ch.productId}">${I18N.t('openStoreBtn')}</button>`
         : hasWings
@@ -66,7 +149,7 @@ const UI = (() => {
     `, body => {
       const cv = body.querySelector('#worldMapCanvas');
       const pos = gameRef.getOverworldPos();
-      Art.renderWorldMapCanvas(cv, pos.x, pos.y, st);
+      if (cv) Art.renderWorldMapCanvas(cv, pos.x, pos.y, st);
 
       body.querySelectorAll('[data-warp]').forEach(btn => {
         btn.onclick = () => {
@@ -87,28 +170,15 @@ const UI = (() => {
           openStore('chapters');
         };
       });
-    });
+    }, { type: 'worldMap' });
   }
 
   /* ---------------- 2. Reward Vault (IAA Ad Unlocks + Gold Supplies) ---------------- */
-  function isProductOwned(p, st) {
-    if (p.repeatable) return false;
-    const g = p.grants || {};
-    const chOk = !g.chapters || g.chapters.every(cid => st.unlockedChapters.includes(cid));
-    const heroOk = !g.heroes || g.heroes.every(hid => st.unlockedHeroes.includes(hid));
-    const toolOk = !g.tools || g.tools.every(tid => st.tools.includes(tid));
-    return chOk && heroOk && toolOk;
-  }
-
-  function adBtnLabel(prod, st) {
-    if (prod.repeatable || prod.adCost === 1) return I18N.t('storeWatchAdSingle');
-    const done = (st.adProgress && st.adProgress[prod.id]) || 0;
-    return I18N.t('storeWatchAd', { done, cost: prod.adCost });
-  }
-
   function openStore(tab) {
+    const D = getD();
     if (tab) storeTab = tab;
     const st = gameRef.getState();
+    const adBusy = Platform.isRewardedAdInFlight();
 
     const tabsHtml = `
       <div class="tabs">
@@ -143,7 +213,7 @@ const UI = (() => {
               <div class="sc-act">
                 ${owned
                   ? `<span class="badge owned">✅ ${I18N.t('storeOwned')}</span>`
-                  : `<button class="sm-btn gold" data-watch-ad="${p.id}">${adBtnLabel(p, st)}</button>`}
+                  : `<button class="sm-btn gold" data-watch-ad="${p.id}" ${adBusy ? 'disabled' : ''}>${adBtnLabel(p, st)}</button>`}
               </div>
             </div>`;
         });
@@ -158,7 +228,7 @@ const UI = (() => {
           else if (h.goldPrice) actBtn = `<button class="sm-btn primary" data-buy-hero-gold="${h.id}">${I18N.t('storeBuyGold', { price: h.goldPrice })}</button>`;
           else {
             const prod = D.PRODUCT_BY_ID[h.productId];
-            actBtn = `<button class="sm-btn gold" data-watch-ad="${prod.id}">${adBtnLabel(prod, st)}</button>`;
+            actBtn = `<button class="sm-btn gold" data-watch-ad="${prod.id}" ${adBusy ? 'disabled' : ''}>${adBtnLabel(prod, st)}</button>`;
           }
           return `
             <div class="store-card">
@@ -181,7 +251,7 @@ const UI = (() => {
             if (tl.goldPrice) btns.push(`<button class="sm-btn primary" data-buy-tool-gold="${tl.id}">${I18N.t('storeBuyGold', { price: tl.goldPrice })}</button>`);
             if (tl.productId) {
               const prod = D.PRODUCT_BY_ID[tl.productId];
-              btns.push(`<button class="sm-btn gold" data-watch-ad="${prod.id}">${adBtnLabel(prod, st)}</button>`);
+              btns.push(`<button class="sm-btn gold" data-watch-ad="${prod.id}" ${adBusy ? 'disabled' : ''}>${adBtnLabel(prod, st)}</button>`);
             }
             actHtml = btns.join('');
           }
@@ -205,7 +275,7 @@ const UI = (() => {
               <p>${I18N.pick(adPack.desc)}</p>
             </div>
             <div class="sc-act">
-              <button class="sm-btn gold" data-watch-ad="${adPack.id}">${adBtnLabel(adPack, st)}</button>
+              <button class="sm-btn gold" data-watch-ad="${adPack.id}" ${adBusy ? 'disabled' : ''}>${adBtnLabel(adPack, st)}</button>
             </div>
           </div>`;
         html += D.SUPPLIES.map(sp => `
@@ -227,68 +297,61 @@ const UI = (() => {
         btn.onclick = () => {
           const prod = D.PRODUCT_BY_ID[btn.dataset.watchAd];
           if (!prod) return;
-          triggerAdUnlock(prod, () => openStore(storeTab));
+          triggerAdUnlock(prod, () => openStore(storeTab), btn);
         };
       });
       grid.querySelectorAll('[data-buy-hero-gold]').forEach(btn => {
         btn.onclick = () => {
           const h = D.HERO_BY_ID[btn.dataset.buyHeroGold];
-          if (gameRef.spendGold(h.goldPrice)) {
-            if (!st.unlockedHeroes.includes(h.id)) st.unlockedHeroes.push(h.id);
-            st.heroId = h.id;
-            gameRef.syncPartyStats();
-            AudioFX.sfx.unlock();
-            gameRef.toast(I18N.t('unlockedToast', { name: I18N.pick(h.name) }));
-            gameRef.saveAndSync();
-            openStore('heroes');
-          }
+          if (gameRef.buyHeroWithGold(h)) openStore('heroes');
         };
       });
       grid.querySelectorAll('[data-equip-hero]').forEach(btn => {
         btn.onclick = () => {
-          st.heroId = btn.dataset.equipHero;
-          gameRef.syncPartyStats();
-          AudioFX.sfx.tap();
-          gameRef.saveAndSync();
+          gameRef.equipHero(btn.dataset.equipHero);
           openStore('heroes');
         };
       });
       grid.querySelectorAll('[data-buy-tool-gold]').forEach(btn => {
         btn.onclick = () => {
           const tl = D.TOOL_BY_ID[btn.dataset.buyToolGold];
-          if (gameRef.spendGold(tl.goldPrice)) {
-            if (!st.tools.includes(tl.id)) st.tools.push(tl.id);
-            AudioFX.sfx.unlock();
-            gameRef.toast(I18N.t('unlockedToast', { name: I18N.pick(tl.name) }));
-            gameRef.saveAndSync();
-            openStore('tools');
-          }
+          if (gameRef.buyToolWithGold(tl)) openStore('tools');
         };
       });
       grid.querySelectorAll('[data-buy-supply]').forEach(btn => {
         btn.onclick = () => {
           const sp = D.SUPPLIES.find(x => x.id === btn.dataset.buySupply);
-          if (gameRef.spendGold(sp.price)) {
-            st.items[sp.id] = (st.items[sp.id] || 0) + sp.amount;
-            AudioFX.sfx.chest();
-            gameRef.toast(I18N.t('boughtToast', { name: I18N.pick(sp.name) }));
-            gameRef.saveAndSync();
-          }
+          gameRef.buySupplyWithGold(sp);
         };
       });
-    });
+    }, { type: 'store' });
   }
 
-  function triggerAdUnlock(prod, onAfter) {
-    Platform.showRewardedAd(
+  function triggerAdUnlock(prod, onAfter, btnEl) {
+    if (Platform.isRewardedAdInFlight()) {
+      AudioFX.sfx.locked();
+      gameRef.toast(I18N.t('adBusyToast'));
+      return false;
+    }
+    if (btnEl) {
+      btnEl.disabled = true;
+      btnEl.textContent = I18N.t('storeAdLoading');
+    }
+    return Platform.showRewardedAd(
       prod,
       () => {
         gameRef.recordAdProgress(prod);
         if (onAfter) onAfter();
       },
-      () => {
+      reason => {
         AudioFX.sfx.locked();
-        gameRef.toast(I18N.t('adIncompleteToast'));
+        if (reason === 'ad_unavailable' || reason === 'ad_create_error' || reason === 'ad_show_error' || reason === 'ad_error') {
+          gameRef.toast(I18N.t('adUnavailableToast'));
+        } else if (reason === 'busy') {
+          gameRef.toast(I18N.t('adBusyToast'));
+        } else {
+          gameRef.toast(I18N.t('adIncompleteToast'));
+        }
         if (onAfter) onAfter();
       },
       openSimulatedAdModal
@@ -298,13 +361,14 @@ const UI = (() => {
   /* ---------------- Sandbox Rewarded Video Ad Player Modal ---------------- */
   function openSimulatedAdModal(prod, onComplete, onSkip) {
     const st = gameRef.getState();
-    const done = prod.repeatable ? 0 : ((st.adProgress && st.adProgress[prod.id]) || 0);
+    const done = prod.repeatable ? 0 : getEffectiveAdProgress(prod, st);
+    pendingAdCancel = onSkip;
     openModal(I18N.t('adPlayerTitle'), `
       <div class="checkout-box">
         <div class="co-emoji">🎬 ${prod.emoji}</div>
         <h3>${I18N.pick(prod.name)}</h3>
         <p>${I18N.pick(prod.desc)}</p>
-        <div class="co-price">${done + 1} / ${prod.adCost} <span>🎬</span></div>
+        <div class="co-price">${Math.min(prod.adCost, done + 1)} / ${prod.adCost} <span>🎬</span></div>
         <div class="co-note">${I18N.t('checkoutBridge')} (${Platform.getEnvName()})</div>
         <div class="co-btns">
           <button class="big-btn green" id="adConfirm">${I18N.t('adPlayerConfirm')}</button>
@@ -312,17 +376,31 @@ const UI = (() => {
         </div>
       </div>
     `, body => {
-      body.querySelector('#adConfirm').onclick = () => { onComplete(); };
-      body.querySelector('#adSkip').onclick = () => { onSkip(); };
-    });
+      const confirmBtn = body.querySelector('#adConfirm');
+      const skipBtn = body.querySelector('#adSkip');
+      if (confirmBtn) {
+        confirmBtn.onclick = () => {
+          pendingAdCancel = null;
+          onComplete();
+        };
+      }
+      if (skipBtn) {
+        skipBtn.onclick = () => {
+          pendingAdCancel = null;
+          onSkip('incomplete');
+        };
+      }
+    }, { type: 'simAd', arg: { prod, onComplete, onSkip } });
   }
 
   /* ---------------- Chapter Gate Locked Preview Modal ---------------- */
   function openGateLockModal(chapterId) {
+    const D = getD();
     const ch = D.getChapter(chapterId);
     const prod = D.PRODUCT_BY_ID[ch.productId];
     const st = gameRef.getState();
-    const done = (st.adProgress && st.adProgress[prod.id]) || 0;
+    const done = getEffectiveAdProgress(prod, st);
+    const adBusy = Platform.isRewardedAdInFlight();
     openModal(I18N.t('gateLockedTitle'), `
       <div class="checkout-box">
         <div class="co-emoji">${ch.emoji}</div>
@@ -330,25 +408,31 @@ const UI = (() => {
         <p>${I18N.t('gateLockedDesc', { chName: I18N.pick(ch.name), cost: ch.adCost, done })}</p>
         <div class="co-price">🎬 ${done} / ${ch.adCost}</div>
         <div class="co-btns">
-          <button class="big-btn gold" id="gateWatchAd">${I18N.t('storeWatchAd', { done, cost: ch.adCost })}</button>
+          <button class="big-btn gold" id="gateWatchAd" ${adBusy ? 'disabled' : ''}>${adBtnLabel(prod, st)}</button>
           <button class="big-btn primary" id="gateOpenStore">👑 ${I18N.t('storeTitle')}</button>
           <button class="big-btn ghost" id="gateClose">${I18N.t('notNowBtn')}</button>
         </div>
       </div>
     `, body => {
-      body.querySelector('#gateWatchAd').onclick = () => {
-        triggerAdUnlock(prod, () => {
-          if (st.unlockedChapters.includes(chapterId)) closeModal();
-          else openGateLockModal(chapterId);
-        });
-      };
-      body.querySelector('#gateOpenStore').onclick = () => { storeTab = 'chapters'; openStore('chapters'); };
-      body.querySelector('#gateClose').onclick = closeModal;
-    });
+      const watchBtn = body.querySelector('#gateWatchAd');
+      if (watchBtn) {
+        watchBtn.onclick = () => {
+          triggerAdUnlock(prod, () => {
+            if (st.unlockedChapters.includes(chapterId)) closeModal();
+            else openGateLockModal(chapterId);
+          }, watchBtn);
+        };
+      }
+      const storeBtn = body.querySelector('#gateOpenStore');
+      if (storeBtn) storeBtn.onclick = () => { storeTab = 'chapters'; openStore('chapters'); };
+      const closeBtn = body.querySelector('#gateClose');
+      if (closeBtn) closeBtn.onclick = closeModal;
+    }, { type: 'gate', arg: chapterId });
   }
 
   /* ---------------- 3. Critterdex (25 Original Critters by Chapter) ---------------- */
   function openDex() {
+    const D = getD();
     const st = gameRef.getState();
     const sections = D.CHAPTERS.map(ch => {
       const list = D.CRITTERS.filter(c => c.chapter === ch.id);
@@ -376,11 +460,12 @@ const UI = (() => {
         <div class="dex-grid">${cards}</div>`;
     }).join('');
 
-    openModal(`📖 ${I18N.t('dex')} (${st.caughtIds.length}/${D.CRITTERS.length})`, sections);
+    openModal(`📖 ${I18N.t('dex')} (${st.caughtIds.length}/${D.CRITTERS.length})`, sections, null, { type: 'dex' });
   }
 
   /* ---------------- 4. Party, Crests & Active Hero ---------------- */
   function openParty() {
+    const D = getD();
     const st = gameRef.getState();
     const hero = D.HERO_BY_ID[st.heroId] || D.HEROES[0];
     const crestsHtml = D.CHAPTERS.map(ch => {
@@ -419,7 +504,8 @@ const UI = (() => {
       <h3 class="sec-h">🐾 ${I18N.t('party')} (${st.party.length})</h3>
       <div class="store-grid">${partyHtml}</div>
     `, body => {
-      body.querySelector('#switchHeroBtn').onclick = () => openStore('heroes');
+      const swBtn = body.querySelector('#switchHeroBtn');
+      if (swBtn) swBtn.onclick = () => openStore('heroes');
       body.querySelectorAll('[data-set-p]').forEach(btn => {
         btn.onclick = () => {
           st.activePartnerIdx = parseInt(btn.dataset.setP, 10);
@@ -428,11 +514,12 @@ const UI = (() => {
           openParty();
         };
       });
-    });
+    }, { type: 'party' });
   }
 
   /* ---------------- 5. Bag & Fancy Tool Belt ---------------- */
   function openBag() {
+    const D = getD();
     const st = gameRef.getState();
     const toolsHtml = D.TOOLS.map(tl => {
       const owned = st.tools.includes(tl.id);
@@ -459,40 +546,65 @@ const UI = (() => {
       <div class="store-grid">${toolsHtml}</div>
     `, body => {
       body.querySelectorAll('[data-go-tools]').forEach(b => { b.onclick = () => openStore('tools'); });
-    });
+    }, { type: 'bag' });
   }
 
-  /* ---------------- 6. Settings & WeChat Readiness Panel ---------------- */
+  /* ---------------- 6. Settings (Zero browser confirm()) ---------------- */
   function openSettings() {
-    const st = gameRef.getState();
+    const resetBlock = resetConfirmStep
+      ? `<button class="big-btn danger" id="setResetConfirmBtn">⚠️ ${I18N.t('resetConfirm')}</button>
+         <button class="big-btn ghost" id="setResetCancelBtn">${I18N.t('resetCancel')}</button>`
+      : `<button class="big-btn ghost" id="setResetBtn">🗑️ ${I18N.t('resetSave')}</button>`;
+
     openModal(I18N.t('settingsTitle'), `
       <div class="wechat-box">
-        <div class="badge owned">✅ ${I18N.t('wechatReadyBadge')}</div>
+        <div class="badge owned">✨ ${I18N.t('wechatReadyBadge')}</div>
         <p>${I18N.t('wechatReadyInfo')}</p>
-        <small>${I18N.t('runtimeLabel')}${I18N.t('sep')}<code>${Platform.getEnvName()}</code> · ${I18N.t('adViewsLabel')}${I18N.t('sep')}<b>${st.adViewsTotal || 0}</b></small>
+        <small>${I18N.t('runtimeLabel')}${I18N.t('sep')}<code>${Platform.getEnvName()}</code></small>
       </div>
       <div class="set-btns">
         <button class="big-btn" id="setLangBtn">🌐 ${I18N.getLang() === 'zh' ? 'Switch to English' : '切换为简体中文'}</button>
-        <button class="big-btn ghost" id="setResetBtn">🗑️ ${I18N.t('resetSave')}</button>
+        ${resetBlock}
       </div>
     `, body => {
-      body.querySelector('#setLangBtn').onclick = () => {
-        I18N.toggleLang();
-        gameRef.refreshLabels();
-        openSettings();
-      };
-      body.querySelector('#setResetBtn').onclick = () => {
-        if (confirm(I18N.t('resetConfirm'))) {
+      const langBtn = body.querySelector('#setLangBtn');
+      if (langBtn) {
+        langBtn.onclick = () => {
+          I18N.toggleLang();
+          gameRef.refreshLabels();
+        };
+      }
+      const resetBtn = body.querySelector('#setResetBtn');
+      if (resetBtn) {
+        resetBtn.onclick = () => {
+          resetConfirmStep = true;
+          openSettings();
+        };
+      }
+      const confirmBtn = body.querySelector('#setResetConfirmBtn');
+      if (confirmBtn) {
+        confirmBtn.onclick = () => {
+          resetConfirmStep = false;
           closeModal();
           gameRef.resetGame();
-        }
-      };
-    });
+        };
+      }
+      const cancelBtn = body.querySelector('#setResetCancelBtn');
+      if (cancelBtn) {
+        cancelBtn.onclick = () => {
+          resetConfirmStep = false;
+          openSettings();
+        };
+      }
+    }, { type: 'settings' });
   }
 
   return {
-    bind, openModal, closeModal,
+    bind, openModal, closeModal, refreshActiveModal,
     openWorldMap, openStore, openGateLockModal,
     openDex, openParty, openBag, openSettings,
+    isProductOwned, getEffectiveAdProgress, triggerAdUnlock,
   };
 })();
+if (typeof globalThis !== 'undefined') globalThis.UI = UI;
+if (typeof module === 'object' && module.exports) module.exports = UI;

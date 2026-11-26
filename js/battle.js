@@ -2,21 +2,27 @@
 /* ==========================================================================
  * battle.js — Turn-Based RPG Battle & Critter Capture Engine
  * Integrates Hero Passive Perks, Fancy Tool Bonuses (Prism Staff, Magnet),
- * Type Effectiveness, Orb Selection, Boss Rewards & Canvas VFX.
+ * Type Effectiveness, Level-Gap Dampener, Input/Submenu Locks, Timer Cleanup,
+ * Live Language Refresh & Canvas VFX.
  * ========================================================================== */
 const Battle = (() => {
-  const D = GameData;
+  const getD = () => (typeof GameData !== 'undefined' ? GameData : globalThis.GameData);
   let active = false;
   let state = null;
   let wild = null;
   let isBoss = false;
   let chapterId = 1;
   let busy = false;
+  let menuOpen = false;
+  let currentSubmenu = null; // 'orb' | 'switch' | null
+  let victoryTriggered = false;
   let fedCount = 0;
   let shieldActive = false;
   let onEndCb = null;
+  let lastMsgSpec = null;
 
-  // Animation state
+  // Timer & animation tracking
+  const pendingTimers = new Set();
   let rafId = null;
   let animTime = 0;
   let wildOffset = { x: 0, y: 0, shake: 0 };
@@ -24,22 +30,72 @@ const Battle = (() => {
   let orbAnim = null; // { t, color, rainbow }
   let fxList = [];
 
-  const $ = id => document.getElementById(id);
+  const $ = id => (typeof document !== 'undefined' ? document.getElementById(id) : null);
 
-  function calcStats(critterId, lv, isPlayerTeam) {
+  function scheduleTimer(fn, ms) {
+    const id = setTimeout(() => {
+      pendingTimers.delete(id);
+      if (!active) return;
+      fn();
+    }, ms);
+    pendingTimers.add(id);
+    return id;
+  }
+
+  function clearPendingTimers() {
+    pendingTimers.forEach(id => clearTimeout(id));
+    pendingTimers.clear();
+  }
+
+  function levelGapMult(atkLv, defLv) {
+    const diff = (atkLv || 1) - (defLv || 1);
+    return Math.max(0.78, Math.min(1.25, 1 + diff * 0.03));
+  }
+
+  function calcStats(critterId, lv, isPlayerTeam, stateOverride) {
+    const D = getD();
+    const stObj = stateOverride || state;
     const base = D.CRITTER_BY_ID[critterId] || D.CRITTERS[0];
     let hpMult = 1, atkMult = 1;
-    if (isPlayerTeam && state) {
-      const hero = D.HERO_BY_ID[state.heroId];
+    if (isPlayerTeam && stObj) {
+      const hero = D.HERO_BY_ID[stObj.heroId];
       if (hero && hero.perk) {
         if (hero.perk.hpMult) hpMult *= hero.perk.hpMult;
         if (hero.perk.atkMult) atkMult *= hero.perk.atkMult;
       }
     }
     const maxHp = Math.round((base.hp + lv * 6) * hpMult);
-    const atk = Math.round((base.atk + lv * 2.1) * atkMult);
+    const atk = Math.round((base.atk + lv * 2.15) * atkMult);
     const spd = Math.round(base.spd + lv * 1.3);
     return { maxHp, atk, spd };
+  }
+
+  function calcPlayerDamage(mine, wildObj, stObj, rng) {
+    const D = getD();
+    const mCr = D.CRITTER_BY_ID[mine.id] || D.CRITTERS[0];
+    const wCr = D.CRITTER_BY_ID[wildObj.id] || D.CRITTERS[0];
+    const mst = calcStats(mine.id, mine.lv, true, stObj);
+    let mult = D.typeMultiplier(mCr.elem, wCr.elem);
+    const hero = stObj ? D.HERO_BY_ID[stObj.heroId] : null;
+    if (hero && hero.perk && hero.perk.elemBonus && hero.perk.elemBonus.includes(mCr.elem)) {
+      mult *= hero.perk.elemMult;
+    }
+    const gap = levelGapMult(mine.lv, wildObj.lv);
+    const roll = 0.90 + (typeof rng === 'function' ? rng() : Math.random()) * 0.25;
+    const dmg = Math.max(4, Math.round(mst.atk * mult * gap * roll));
+    return { dmg, mult };
+  }
+
+  function calcEnemyDamage(wildObj, mine, shielded, rng) {
+    const D = getD();
+    const mCr = D.CRITTER_BY_ID[mine.id] || D.CRITTERS[0];
+    const wCr = D.CRITTER_BY_ID[wildObj.id] || D.CRITTERS[0];
+    const mult = D.typeMultiplier(wCr.elem, mCr.elem);
+    const gap = levelGapMult(wildObj.lv, mine.lv);
+    const roll = 0.72 + (typeof rng === 'function' ? rng() : Math.random()) * 0.20;
+    let dmg = Math.max(3, Math.round(wildObj.atk * mult * gap * roll));
+    if (shielded) dmg = Math.max(1, Math.round(dmg * 0.45));
+    return { dmg, mult };
   }
 
   function getActiveMine() {
@@ -55,6 +111,7 @@ const Battle = (() => {
   }
 
   function getCatchChance(orbMult) {
+    const D = getD();
     const base = D.CRITTER_BY_ID[wild.id].catchBase;
     const hpRatio = Math.max(0, wild.hp / wild.maxHp);
     const hpBonus = (1 - hpRatio) * 0.42;
@@ -66,13 +123,66 @@ const Battle = (() => {
     return Math.max(0.08, Math.min(0.98, raw));
   }
 
+  function closeSubmenu() {
+    menuOpen = false;
+    currentSubmenu = null;
+    const sub = $('bSub');
+    if (sub) {
+      sub.classList.add('hidden');
+      sub.innerHTML = '';
+    }
+    const acts = $('bActions');
+    if (acts) acts.classList.remove('hidden');
+  }
+
+  function renderMsgSpec(spec) {
+    if (!spec) return '';
+    const D = getD();
+    const vars = {};
+    if (spec.vars) {
+      Object.keys(spec.vars).forEach(k => {
+        const v = spec.vars[k];
+        if (v && typeof v === 'object' && v.critterNameId) {
+          const cr = D.CRITTER_BY_ID[v.critterNameId] || D.CRITTERS[0];
+          vars[k] = I18N.pick(cr.name);
+        } else if (v && typeof v === 'object' && v.critterSkillId) {
+          const cr = D.CRITTER_BY_ID[v.critterSkillId] || D.CRITTERS[0];
+          vars[k] = I18N.pick(cr.skill);
+        } else if (v && typeof v === 'object' && v.i18nKey) {
+          vars[k] = I18N.t(v.i18nKey);
+        } else {
+          vars[k] = v;
+        }
+      });
+    }
+    let txt = I18N.t(spec.key, vars);
+    if (spec.extraKey) txt += I18N.t(spec.extraKey);
+    return txt;
+  }
+
+  function setMsgKey(key, vars, extraKey) {
+    lastMsgSpec = { key, vars: vars || null, extraKey: extraKey || null };
+    const el = $('bMsg');
+    if (el) el.textContent = renderMsgSpec(lastMsgSpec);
+  }
+
   function start(gameState, critterId, lv, bossFlag, chId, onEnd) {
+    clearPendingTimers();
+    if (rafId && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+
+    const D = getD();
     state = gameState;
     isBoss = !!bossFlag;
     chapterId = chId || 1;
     onEndCb = onEnd;
     fedCount = 0;
     busy = false;
+    menuOpen = false;
+    currentSubmenu = null;
+    victoryTriggered = false;
     orbAnim = null;
     fxList = [];
 
@@ -80,7 +190,7 @@ const Battle = (() => {
     shieldActive = !!(hero && hero.perk && hero.perk.startShield);
 
     const st = calcStats(critterId, lv, false);
-    const bossHpMult = isBoss ? 1.25 : 1.0;
+    const bossHpMult = isBoss ? 1.15 : 1.0;
     wild = {
       id: critterId,
       lv,
@@ -97,53 +207,66 @@ const Battle = (() => {
     mine.hp = Math.min(mine.maxHp, mine.hp);
 
     active = true;
-    $('battle').classList.remove('hidden');
-    $('bSub').classList.add('hidden');
-    $('bActions').classList.remove('hidden');
+    const bEl = $('battle');
+    if (bEl) bEl.classList.remove('hidden');
+    closeSubmenu();
     AudioFX.playBgm('battle');
 
-    const cr = D.CRITTER_BY_ID[wild.id];
-    setMsg(I18N.t(isBoss ? 'battleBossAppeared' : 'battleWildAppeared', {
-      name: I18N.pick(cr.name), lv: wild.lv,
-    }));
+    setMsgKey(isBoss ? 'battleBossAppeared' : 'battleWildAppeared', {
+      name: { critterNameId: wild.id },
+      lv: wild.lv,
+    });
     syncUI();
     startLoop();
   }
 
-  function setMsg(text) {
-    $('bMsg').textContent = text;
-  }
-
   function syncUI() {
+    if (!active || !wild || !state) return;
+    const D = getD();
     const wCr = D.CRITTER_BY_ID[wild.id];
     const mine = getActiveMine();
     const mCr = D.CRITTER_BY_ID[mine.id];
 
-    $('bwName').textContent = I18N.pick(wCr.name);
-    $('bwLv').textContent = 'Lv.' + wild.lv;
-    $('bwBadge').textContent = isBoss ? '👑 BOSS' : I18N.t('elemNames')[wCr.elem] || wCr.elem;
-    $('bwHp').style.width = Math.max(0, Math.round((wild.hp / wild.maxHp) * 100)) + '%';
-    $('bwHpTxt').textContent = `${wild.hp}/${wild.maxHp}`;
-    const chancePct = Math.round(getCatchChance(1.0) * 100);
-    $('bwCatch').style.width = chancePct + '%';
-    $('bwCatchTxt').textContent = `🎯 ${I18N.t('catchChance')} ${chancePct}%`;
+    const setTxt = (id, t) => { const el = $(id); if (el) el.textContent = t; };
+    const setW = (id, pct) => { const el = $(id); if (el && el.style) el.style.width = pct; };
 
-    $('bmName').textContent = I18N.pick(mCr.name) + (shieldActive ? ' 🛡️' : '');
-    $('bmLv').textContent = 'Lv.' + mine.lv;
-    $('bmHp').style.width = Math.max(0, Math.round((mine.hp / mine.maxHp) * 100)) + '%';
-    $('bmHpTxt').textContent = `${mine.hp}/${mine.maxHp}`;
+    setTxt('bwName', I18N.pick(wCr.name));
+    setTxt('bwLv', 'Lv.' + wild.lv);
+    setTxt('bwBadge', isBoss ? '👑 BOSS' : (I18N.t('elemNames')[wCr.elem] || wCr.elem));
+    setW('bwHp', Math.max(0, Math.round((wild.hp / wild.maxHp) * 100)) + '%');
+    setTxt('bwHpTxt', `${wild.hp}/${wild.maxHp}`);
+    const chancePct = Math.round(getCatchChance(1.0) * 100);
+    setW('bwCatch', chancePct + '%');
+    setTxt('bwCatchTxt', `🎯 ${I18N.t('catchChance')} ${chancePct}%`);
+
+    setTxt('bmName', I18N.pick(mCr.name) + (shieldActive ? ' 🛡️' : ''));
+    setTxt('bmLv', 'Lv.' + mine.lv);
+    setW('bmHp', Math.max(0, Math.round((mine.hp / mine.maxHp) * 100)) + '%');
+    setTxt('bmHpTxt', `${mine.hp}/${mine.maxHp}`);
     const needExp = mine.lv * 30;
-    $('bmExp').style.width = Math.min(100, Math.round((mine.exp / needExp) * 100)) + '%';
+    setW('bmExp', Math.min(100, Math.round((mine.exp / needExp) * 100)) + '%');
 
     // Button labels
-    $('bAttackLabel').textContent = I18N.t('attack');
-    $('bMoveName').textContent = I18N.pick(mCr.skill);
-    $('bCatchLabel').textContent = I18N.t('catchBtn');
-    $('bCatchInfo').textContent = `🔵${state.items.orbs} 🌈${state.items.superOrbs} 👑${state.items.masterOrbs}`;
-    $('bFeedLabel').textContent = I18N.t('feedBtn');
-    $('bFeedInfo').textContent = `🍓×${state.items.treats} · ${I18N.t('feedInfo')}`;
-    $('bSwitchLabel').textContent = I18N.t('switchRun');
-    $('bSwitchInfo').textContent = I18N.t('switchInfo');
+    setTxt('bAttackLabel', I18N.t('attack'));
+    setTxt('bMoveName', I18N.pick(mCr.skill));
+    setTxt('bCatchLabel', I18N.t('catchBtn'));
+    setTxt('bCatchInfo', `🔵${state.items.orbs} 🌈${state.items.superOrbs} 👑${state.items.masterOrbs}`);
+    setTxt('bFeedLabel', I18N.t('feedBtn'));
+    setTxt('bFeedInfo', `🍓×${state.items.treats} · ${I18N.t('feedInfo')}`);
+    setTxt('bSwitchLabel', I18N.t('switchRun'));
+    setTxt('bSwitchInfo', I18N.t('switchInfo'));
+    setTxt('bLangBtn', '🌐 ' + I18N.t('langLabel'));
+  }
+
+  function refreshLang() {
+    if (!active) return;
+    if (lastMsgSpec) {
+      const el = $('bMsg');
+      if (el) el.textContent = renderMsgSpec(lastMsgSpec);
+    }
+    syncUI();
+    if (currentSubmenu === 'orb') openOrbMenu();
+    else if (currentSubmenu === 'switch') openSwitchMenu();
   }
 
   function spawnParticles(x, y, color, count) {
@@ -155,14 +278,18 @@ const Battle = (() => {
   }
 
   function startLoop() {
-    if (rafId) cancelAnimationFrame(rafId);
     const cv = $('battleCanvas');
+    if (!cv || typeof cv.getContext !== 'function' || typeof requestAnimationFrame !== 'function') return;
+    if (rafId && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(rafId);
     const c = cv.getContext('2d');
+    if (!c) return;
     const tick = () => {
       if (!active) return;
       animTime += 0.016;
-      const rect = cv.parentElement.getBoundingClientRect();
-      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const rect = cv.parentElement && cv.parentElement.getBoundingClientRect
+        ? cv.parentElement.getBoundingClientRect()
+        : { width: 480, height: 280 };
+      const dpr = Math.min(2, (typeof window !== 'undefined' && window.devicePixelRatio) || 1);
       const w = Math.max(300, Math.floor(rect.width));
       const h = Math.max(200, Math.floor(rect.height));
       if (cv.width !== w * dpr || cv.height !== h * dpr) {
@@ -171,7 +298,6 @@ const Battle = (() => {
       c.save();
       c.scale(dpr, dpr);
 
-      // Biome sky & arena backdrop
       const skyColors = {
         1: ['#7dd3fc', '#bbf7d0', '#4ade80'],
         2: ['#38bdf8', '#a5f3fc', '#fde68a'],
@@ -187,31 +313,26 @@ const Battle = (() => {
       c.fillStyle = g;
       c.fillRect(0, 0, w, h);
 
-      // Platforms
       const wx = w * 0.72, wy = h * 0.44;
       const mx = w * 0.27, my = h * 0.72;
       c.fillStyle = 'rgba(255,255,255,0.42)';
       c.beginPath(); c.ellipse(wx, wy + 46, 68, 20, 0, 0, Math.PI * 2); c.fill();
       c.beginPath(); c.ellipse(mx, my + 42, 74, 22, 0, 0, Math.PI * 2); c.fill();
 
-      // Decay lunge/shake offsets
       wildOffset.x *= 0.85; wildOffset.y *= 0.85; wildOffset.shake *= 0.85;
       mineOffset.x *= 0.85; mineOffset.y *= 0.85; mineOffset.shake *= 0.85;
       const wShake = wildOffset.shake > 0.3 ? (Math.random() - 0.5) * wildOffset.shake * 14 : 0;
       const mShake = mineOffset.shake > 0.3 ? (Math.random() - 0.5) * mineOffset.shake * 14 : 0;
 
-      // Draw Wild Critter
       const wildSize = Math.min(138, h * 0.48);
       Art.drawCritter(c, wild.id, wx + wildOffset.x + wShake, wy + wildOffset.y, wildSize, animTime, false);
 
-      // Draw Player Partner Critter
       const mine = getActiveMine();
       if (mine) {
         const mineSize = Math.min(132, h * 0.46);
         Art.drawCritter(c, mine.id, mx + mineOffset.x + mShake, my + mineOffset.y, mineSize, animTime + 1.2, true);
       }
 
-      // Draw Orb Throw animation
       if (orbAnim) {
         orbAnim.t += 0.04;
         const p = Math.min(1, orbAnim.t);
@@ -228,7 +349,6 @@ const Battle = (() => {
         if (p >= 1) orbAnim = null;
       }
 
-      // Particles
       for (let i = fxList.length - 1; i >= 0; i--) {
         const f = fxList[i];
         f.x += f.vx; f.y += f.vy; f.life -= 0.032;
@@ -245,7 +365,7 @@ const Battle = (() => {
   }
 
   function handleAction(act) {
-    if (!active || busy) return;
+    if (!active || busy || menuOpen) return;
     AudioFX.sfx.tap();
     if (act === 'attack') return doAttack();
     if (act === 'catch') return openOrbMenu();
@@ -254,43 +374,46 @@ const Battle = (() => {
   }
 
   function doAttack() {
+    if (!active || busy) return;
+    closeSubmenu();
     busy = true;
+    const D = getD();
     const mine = getActiveMine();
     const mCr = D.CRITTER_BY_ID[mine.id];
-    const wCr = D.CRITTER_BY_ID[wild.id];
-    const mst = calcStats(mine.id, mine.lv, true);
-    let mult = D.typeMultiplier(mCr.elem, wCr.elem);
-    const hero = D.HERO_BY_ID[state.heroId];
-    if (hero && hero.perk && hero.perk.elemBonus && hero.perk.elemBonus.includes(mCr.elem)) {
-      mult *= hero.perk.elemMult;
-    }
-    const dmg = Math.max(4, Math.round(mst.atk * mult * (0.9 + Math.random() * 0.25)));
+    const { dmg, mult } = calcPlayerDamage(mine, wild, state);
+
     mineOffset.x = 34; mineOffset.y = -18;
     wildOffset.shake = 1.0;
     wild.hp = Math.max(0, wild.hp - dmg);
     const cv = $('battleCanvas');
-    spawnParticles(cv.clientWidth * 0.72, cv.clientHeight * 0.44, mCr.art.accent, 18);
-    if (mult > 1.2) AudioFX.sfx.superHit(); else AudioFX.sfx.hit();
+    if (cv) spawnParticles((cv.clientWidth || 400) * 0.72, (cv.clientHeight || 240) * 0.44, mCr.art.accent, 18);
+    if (mult > 1.15) AudioFX.sfx.superHit(); else AudioFX.sfx.hit();
 
-    let extra = '';
-    if (mult > 1.2) extra = I18N.t('battleSuperEffective');
-    else if (mult < 0.85) extra = I18N.t('battleNotEffective');
-    setMsg(I18N.t('battleUsedSkill', { a: I18N.pick(mCr.name), skill: I18N.pick(mCr.skill), dmg }) + extra);
+    const extraKey = mult > 1.15 ? 'battleSuperEffective' : (mult < 0.9 ? 'battleNotEffective' : null);
+    setMsgKey('battleUsedSkill', {
+      a: { critterNameId: mine.id },
+      skill: { critterSkillId: mine.id },
+      dmg,
+    }, extraKey);
     syncUI();
 
-    setTimeout(() => {
+    scheduleTimer(() => {
       if (wild.hp <= 0) return finishVictory(false);
       enemyTurn();
     }, 850);
   }
 
   function openOrbMenu() {
+    if (!active || busy) return;
     const sub = $('bSub');
+    if (!sub) return;
     const total = state.items.orbs + state.items.superOrbs + state.items.masterOrbs;
     if (total <= 0) {
-      setMsg(I18N.t('battleNoOrbs'));
+      setMsgKey('battleNoOrbs');
       return;
     }
+    menuOpen = true;
+    currentSubmenu = 'orb';
     const items = [
       { key: 'orbs', label: `🔵 ${I18N.t('orbs')} (×${state.items.orbs})`, mult: 1.0, color: '#38bdf8' },
       { key: 'superOrbs', label: `🌈 ${I18N.t('superOrbs')} (×${state.items.superOrbs})`, mult: 1.6, color: '#ec4899' },
@@ -301,50 +424,53 @@ const Battle = (() => {
       return `<button class="bsub-btn" data-orb="${it.key}" ${state.items[it.key] <= 0 ? 'disabled' : ''}>${it.label} · <b>${pct}%</b></button>`;
     }).join('') + `<button class="bsub-btn cancel" data-cancel="1">${I18N.t('close')}</button>`;
     sub.classList.remove('hidden');
-    $('bActions').classList.add('hidden');
+    const acts = $('bActions');
+    if (acts) acts.classList.add('hidden');
     sub.querySelectorAll('button').forEach(btn => {
       btn.onclick = () => {
-        sub.classList.add('hidden');
-        $('bActions').classList.remove('hidden');
+        if (!active || busy) return;
+        closeSubmenu();
         if (btn.dataset.cancel) return;
         const spec = items.find(x => x.key === btn.dataset.orb);
-        if (spec) doThrowOrb(spec);
+        if (spec && state.items[spec.key] > 0) doThrowOrb(spec);
       };
     });
   }
 
   function doThrowOrb(spec) {
+    if (!active || busy) return;
     busy = true;
     state.items[spec.key]--;
     AudioFX.sfx.throwOrb();
     orbAnim = { t: 0, color: spec.color, rainbow: state.tools.includes('prismstaff') };
-    setMsg(I18N.t('battleThrowOrb', { orb: I18N.t(spec.key) }));
+    setMsgKey('battleThrowOrb', { orb: { i18nKey: spec.key } });
     syncUI();
 
-    setTimeout(() => {
+    scheduleTimer(() => {
       const chance = spec.mult >= 99 ? 1.0 : getCatchChance(spec.mult);
       const caught = Math.random() < chance;
       const cv = $('battleCanvas');
       if (caught) {
         AudioFX.sfx.catchOk();
-        spawnParticles(cv.clientWidth * 0.72, cv.clientHeight * 0.44, '#fde047', 30);
-        const wCr = D.CRITTER_BY_ID[wild.id];
-        setMsg(I18N.t('battleCaught', { name: I18N.pick(wCr.name) }));
-        setTimeout(() => finishVictory(true), 850);
+        if (cv) spawnParticles((cv.clientWidth || 400) * 0.72, (cv.clientHeight || 240) * 0.44, '#fde047', 30);
+        setMsgKey('battleCaught', { name: { critterNameId: wild.id } });
+        scheduleTimer(() => finishVictory(true), 850);
       } else {
-        const wCr = D.CRITTER_BY_ID[wild.id];
-        setMsg(I18N.t('battleBrokeFree', { name: I18N.pick(wCr.name) }));
-        setTimeout(() => enemyTurn(), 900);
+        setMsgKey('battleBrokeFree', { name: { critterNameId: wild.id } });
+        scheduleTimer(() => enemyTurn(), 900);
       }
     }, 800);
   }
 
   function doFeed() {
+    if (!active || busy) return;
     if (state.items.treats <= 0) {
-      setMsg(I18N.t('battleNoTreats'));
+      setMsgKey('battleNoTreats');
       return;
     }
+    closeSubmenu();
     busy = true;
+    const D = getD();
     state.items.treats--;
     fedCount++;
     const mine = getActiveMine();
@@ -352,16 +478,20 @@ const Battle = (() => {
     const healRatio = 0.32 + ((hero && hero.perk && hero.perk.healBonus) ? hero.perk.healBonus : 0);
     mine.hp = Math.min(mine.maxHp, mine.hp + Math.round(mine.maxHp * healRatio));
     AudioFX.sfx.heal();
-    const wCr = D.CRITTER_BY_ID[wild.id];
     const cv = $('battleCanvas');
-    spawnParticles(cv.clientWidth * 0.72, cv.clientHeight * 0.44, '#f472b6', 16);
-    setMsg(I18N.t('battleFed', { name: I18N.pick(wCr.name) }));
+    if (cv) spawnParticles((cv.clientWidth || 400) * 0.72, (cv.clientHeight || 240) * 0.44, '#f472b6', 16);
+    setMsgKey('battleFed', { name: { critterNameId: wild.id } });
     syncUI();
-    setTimeout(() => enemyTurn(), 850);
+    scheduleTimer(() => enemyTurn(), 850);
   }
 
   function openSwitchMenu() {
+    if (!active || busy) return;
     const sub = $('bSub');
+    if (!sub) return;
+    const D = getD();
+    menuOpen = true;
+    currentSubmenu = 'switch';
     let html = state.party.map((p, idx) => {
       const cr = D.CRITTER_BY_ID[p.id];
       const cur = idx === state.activePartnerIdx;
@@ -371,60 +501,63 @@ const Battle = (() => {
     html += `<button class="bsub-btn cancel" data-cancel="1">${I18N.t('close')}</button>`;
     sub.innerHTML = html;
     sub.classList.remove('hidden');
-    $('bActions').classList.add('hidden');
+    const acts = $('bActions');
+    if (acts) acts.classList.add('hidden');
     sub.querySelectorAll('button').forEach(btn => {
       btn.onclick = () => {
-        sub.classList.add('hidden');
-        $('bActions').classList.remove('hidden');
+        if (!active || busy) return;
+        closeSubmenu();
         if (btn.dataset.cancel) return;
         if (btn.dataset.run) {
-          if (isBoss) { setMsg(I18N.t('battleRunBoss')); AudioFX.sfx.locked(); return; }
+          if (isBoss) { setMsgKey('battleRunBoss'); AudioFX.sfx.locked(); return; }
           busy = true;
-          setMsg(I18N.t('battleRunOk'));
-          setTimeout(() => endBattle({ result: 'run' }), 500);
+          setMsgKey('battleRunOk');
+          scheduleTimer(() => endBattle({ result: 'run' }), 500);
           return;
         }
         const idx = parseInt(btn.dataset.swap, 10);
-        if (!isNaN(idx)) {
+        if (!isNaN(idx) && state.party[idx] && state.party[idx].hp > 0 && idx !== state.activePartnerIdx) {
           state.activePartnerIdx = idx;
           syncUI();
           busy = true;
-          setTimeout(() => enemyTurn(), 500);
+          scheduleTimer(() => enemyTurn(), 500);
         }
       };
     });
   }
 
   function enemyTurn() {
+    if (!active) return;
+    const D = getD();
     const mine = getActiveMine();
-    const mCr = D.CRITTER_BY_ID[mine.id];
     const wCr = D.CRITTER_BY_ID[wild.id];
-    const mult = D.typeMultiplier(wCr.elem, mCr.elem);
-    let dmg = Math.max(3, Math.round(wild.atk * mult * (0.78 + Math.random() * 0.22)));
-    if (shieldActive) {
-      dmg = Math.max(1, Math.round(dmg * 0.45));
-      shieldActive = false;
-    }
+    const { dmg } = calcEnemyDamage(wild, mine, shieldActive);
+    if (shieldActive) shieldActive = false;
+
     wildOffset.x = -34; wildOffset.y = 18;
     mineOffset.shake = 1.0;
     mine.hp = Math.max(0, mine.hp - dmg);
     AudioFX.sfx.hit();
     const cv = $('battleCanvas');
-    spawnParticles(cv.clientWidth * 0.27, cv.clientHeight * 0.72, wCr.art.c1, 14);
-    setMsg(I18N.t('battleUsedSkill', { a: I18N.pick(wCr.name), skill: I18N.pick(wCr.skill), dmg }));
+    if (cv) spawnParticles((cv.clientWidth || 400) * 0.27, (cv.clientHeight || 240) * 0.72, wCr.art.c1, 14);
+    setMsgKey('battleUsedSkill', {
+      a: { critterNameId: wild.id },
+      skill: { critterSkillId: wild.id },
+      dmg,
+    });
     syncUI();
 
-    setTimeout(() => {
+    scheduleTimer(() => {
       if (mine.hp <= 0) {
         const nextIdx = state.party.findIndex(x => x.hp > 0);
         if (nextIdx >= 0) {
           state.activePartnerIdx = nextIdx;
-          setMsg(I18N.t('battleFainted', { name: I18N.pick(mCr.name) }));
+          setMsgKey('battleFainted', { name: { critterNameId: mine.id } });
           syncUI();
           busy = false;
         } else {
-          setMsg(I18N.t('battleAllFainted'));
-          setTimeout(() => endBattle({ result: 'fainted' }), 1100);
+          setMsgKey('battleAllFainted');
+          scheduleTimer(() => endBattle({ result: 'fainted' }), 1100);
         }
       } else {
         busy = false;
@@ -433,13 +566,23 @@ const Battle = (() => {
   }
 
   function finishVictory(caught) {
+    if (!active || victoryTriggered) return;
+    victoryTriggered = true;
+    busy = true;
+    closeSubmenu();
+    const D = getD();
     const hero = D.HERO_BY_ID[state.heroId];
     const expMult = (hero && hero.perk && hero.perk.expMult) ? hero.perk.expMult : 1;
     let goldMult = (hero && hero.perk && hero.perk.goldMult) ? hero.perk.goldMult : 1;
     if (state.tools.includes('magnet')) goldMult *= 1.35;
 
-    const expGain = Math.round((16 + wild.lv * 6) * (isBoss ? 2.5 : 1) * expMult);
-    const goldGain = Math.round((12 + wild.lv * 4) * (isBoss ? 3.5 : 1) * goldMult);
+    const alreadyDefeatedBoss = isBoss && (
+      (Array.isArray(state.defeatedBosses) && state.defeatedBosses.includes(chapterId)) ||
+      (Array.isArray(state.crests) && state.crests.includes(chapterId))
+    );
+
+    const expGain = alreadyDefeatedBoss ? 0 : Math.round((16 + wild.lv * 6) * (isBoss ? 2.5 : 1) * expMult);
+    const goldGain = alreadyDefeatedBoss ? 0 : Math.round((12 + wild.lv * 4) * (isBoss ? 3.5 : 1) * goldMult);
     state.gold += goldGain;
 
     const mine = getActiveMine();
@@ -455,10 +598,14 @@ const Battle = (() => {
     }
     if (leveledUp) AudioFX.sfx.levelUp();
 
-    setMsg(I18N.t('battleWin', { exp: expGain, gold: goldGain }));
+    if (alreadyDefeatedBoss) {
+      setMsgKey('battleWinRematch');
+    } else {
+      setMsgKey('battleWin', { exp: expGain, gold: goldGain });
+    }
     syncUI();
 
-    setTimeout(() => {
+    scheduleTimer(() => {
       endBattle({
         result: caught ? 'caught' : 'win',
         critterId: wild.id,
@@ -468,18 +615,47 @@ const Battle = (() => {
         expGain,
         goldGain,
         leveledUp,
+        rematch: alreadyDefeatedBoss,
       });
     }, 1000);
   }
 
   function endBattle(info) {
+    if (!active) return;
     active = false;
-    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
-    $('battle').classList.add('hidden');
-    if (onEndCb) onEndCb(info);
+    busy = true;
+    clearPendingTimers();
+    closeSubmenu();
+    if (rafId && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    const bEl = $('battle');
+    if (bEl) bEl.classList.add('hidden');
+    const cb = onEndCb;
+    onEndCb = null;
+    if (cb) cb(info);
   }
 
   function isActive() { return active; }
+  function isBusy() { return busy; }
+  function isMenuOpen() { return menuOpen; }
+  function getWild() { return wild; }
 
-  return { start, handleAction, isActive, calcStats };
+  return {
+    start,
+    handleAction,
+    refreshLang,
+    isActive,
+    isBusy,
+    isMenuOpen,
+    getWild,
+    calcStats,
+    calcPlayerDamage,
+    calcEnemyDamage,
+    levelGapMult,
+    endBattle,
+  };
 })();
+if (typeof globalThis !== 'undefined') globalThis.Battle = Battle;
+if (typeof module === 'object' && module.exports) module.exports = Battle;

@@ -37,7 +37,7 @@ jobs:
           pip install playwright
           playwright install chromium --with-deps
 
-      - name: Run Unit + E2E 100% V8 Coverage Tests
+      - name: Run Unit & E2E V8 Coverage Tests
         run: |
           set -o pipefail
           {
@@ -48,14 +48,18 @@ jobs:
             python3 tests/e2e_coverage.py
           } | tee test_output.log
 
-      - name: Run Independent Claude & GPT QA Agents
+      - name: Run Independent Claude & GPT QA Agents (Optional API Mode)
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CLAUDE_MODEL: ${{ inputs.claude_model || 'claude-opus-4-1' }}
           GPT_MODEL: ${{ inputs.gpt_model || 'gpt-5' }}
         run: |
-          python3 scripts/multi_agent_qa.py --test-log test_output.log --out-dir qa-reports
+          if [ -n "$ANTHROPIC_API_KEY" ] || [ -n "$OPENAI_API_KEY" ]; then
+            python3 scripts/multi_agent_qa.py --test-log test_output.log --out-dir qa-reports
+          else
+            echo "Skipping API-key multi_agent_qa.py (subscription PR review mode active)."
+          fi
 
       - name: Upload Independent QA Reports
         if: always()

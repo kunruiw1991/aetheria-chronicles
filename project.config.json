@@ -1,0 +1,36 @@
+{
+  "description": "Aetheria Chronicles — WeChat Mini Game (Personal Entity · Pure IAA)",
+  "packOptions": {
+    "ignore": [
+      { "type": "folder", "value": "tests" },
+      { "type": "folder", "value": "dist" },
+      { "type": "folder", "value": "scripts" },
+      { "type": "folder", "value": ".qa" },
+      { "type": "folder", "value": ".github" },
+      { "type": "folder", "value": "css" },
+      { "type": "file", "value": "index.html" },
+      { "type": "file", "value": "README.md" },
+      { "type": "file", "value": "QA_REVIEW_REQUEST.md" },
+      { "type": "file", "value": "js/ui.js" },
+      { "type": "file", "value": "js/game.js" }
+    ]
+  },
+  "setting": {
+    "urlCheck": true,
+    "es6": true,
+    "enhance": true,
+    "postcss": false,
+    "minified": true,
+    "newFeature": true,
+    "babelSetting": {
+      "ignore": [],
+      "disablePlugins": [],
+      "outputPath": ""
+    }
+  },
+  "compileType": "game",
+  "libVersion": "3.5.0",
+  "appid": "touristappid",
+  "projectname": "aetheria-chronicles",
+  "condition": {}
+}

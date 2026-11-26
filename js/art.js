@@ -753,8 +753,8 @@ const Art = (() => {
   /* ---------------- Cached Portrait DataURL for UI Cards ---------------- */
   function getCritterPortrait(critterId) {
     if (portraitCache[critterId]) return portraitCache[critterId];
-    const cv = document.createElement('canvas');
-    cv.width = 112; cv.height = 112;
+    const cv = createOffscreenCanvas(112, 112);
+    if (!cv) return '';
     const c = cv.getContext('2d');
     const cr = GameData.CRITTER_BY_ID[critterId] || GameData.CRITTERS[0];
     const bg = c.createRadialGradient(56, 56, 8, 56, 56, 56);
@@ -763,16 +763,27 @@ const Art = (() => {
     c.fillStyle = bg;
     rr(c, 2, 2, 108, 108, 22); c.fill();
     drawCritter(c, critterId, 56, 62, 92, 0.4, false);
-    const url = cv.toDataURL('image/png');
+    const url = typeof cv.toDataURL === 'function' ? cv.toDataURL('image/png') : '';
     portraitCache[critterId] = url;
     return url;
+  }
+
+  function createOffscreenCanvas(w, h) {
+    let cv = null;
+    if (typeof wx !== 'undefined' && wx && typeof wx.createCanvas === 'function') {
+      cv = wx.createCanvas();
+    } else if (typeof document !== 'undefined' && typeof document.createElement === 'function') {
+      cv = document.createElement('canvas');
+    }
+    if (cv) { cv.width = w; cv.height = h; }
+    return cv;
   }
 
   function getHeroPortrait(heroId) {
     const key = 'hero_' + heroId;
     if (portraitCache[key]) return portraitCache[key];
-    const cv = document.createElement('canvas');
-    cv.width = 96; cv.height = 96;
+    const cv = createOffscreenCanvas(96, 96);
+    if (!cv) return '';
     const c = cv.getContext('2d');
     const h = GameData.HERO_BY_ID[heroId] || GameData.HEROES[0];
     const bg = c.createRadialGradient(48, 48, 6, 48, 48, 48);
@@ -781,7 +792,7 @@ const Art = (() => {
     c.fillStyle = bg;
     rr(c, 2, 2, 92, 92, 20); c.fill();
     drawHero(c, heroId, 12, 10, 72, 'down', 0, 0, heroId === 'summoner' ? ['wings'] : [], false);
-    const url = cv.toDataURL('image/png');
+    const url = typeof cv.toDataURL === 'function' ? cv.toDataURL('image/png') : '';
     portraitCache[key] = url;
     return url;
   }
@@ -842,7 +853,7 @@ const Art = (() => {
       const cx = ((x1 + x2) * 0.5) * 3;
       const cy = (y1 + 4) * 3;
       const txt = `${ch.emoji} ${I18N.t('chapterPrefix', { n: ch.id })} ${I18N.pick(ch.short)}${unlocked ? '' : ' 🔒'}`;
-      c.font = 'bold 11px sans-serif';
+      c.font = 'bold 12px sans-serif';
       const tw = c.measureText(txt).width + 14;
       c.fillStyle = unlocked ? 'rgba(15,23,42,0.78)' : 'rgba(124,45,18,0.9)';
       rr(c, cx - tw / 2, cy - 9, tw, 18, 9); c.fill();
@@ -870,3 +881,5 @@ const Art = (() => {
     renderWorldMapCanvas,
   };
 })();
+if (typeof globalThis !== 'undefined') globalThis.Art = Art;
+if (typeof module === 'object' && module.exports) module.exports = Art;

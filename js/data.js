@@ -20,8 +20,8 @@ const GameData = (() => {
   };
 
   function typeMultiplier(atkElem, defElem) {
-    if (TYPE_STRONG[atkElem] && TYPE_STRONG[atkElem].includes(defElem)) return 1.45;
-    if (TYPE_STRONG[defElem] && TYPE_STRONG[defElem].includes(atkElem)) return 0.72;
+    if (TYPE_STRONG[atkElem] && TYPE_STRONG[atkElem].includes(defElem)) return 1.25;
+    if (TYPE_STRONG[defElem] && TYPE_STRONG[defElem].includes(atkElem)) return 0.80;
     return 1.0;
   }
 
@@ -48,7 +48,7 @@ const GameData = (() => {
         theme: 'forest',
         bossId: 'oakstag',
         bossLv: 9,
-        wildPool: ['sproutling', 'acornpup', 'flutterfae'],
+        wildPool: ['sproutling', 'acornpup', 'dewdrop', 'flutterfae'],
         sage: {
           name: { zh: '林木长老 · 艾尔', en: 'Elder Sylvan' },
           gift: { orbs: 4, treats: 3, gold: 60 },
@@ -207,10 +207,10 @@ const GameData = (() => {
         wildPool: ['starbunny', 'cometsprite', 'nebulaowl', 'aetherkirin'],
         sage: {
           name: { zh: '星穹大祭司 · 露米娜', en: 'High Oracle Lumina' },
-          gift: { masterOrbs: 2, superOrbs: 5, gold: 300 },
+          gift: { masterOrbs: 1, superOrbs: 5, gold: 300 },
           line: {
-            zh: '星辰为你铺路！收下两颗圣星球，在星穹王座迎接与星界圣龙的终极试炼吧！',
-            en: 'The cosmos opens before you! Take two Astral Orbs for the ultimate trial against Celestiar!',
+            zh: '星辰为你铺路！收下这颗珍贵的圣星球，在星穹王座迎接与星界圣龙的终极试炼吧！',
+            en: 'The cosmos opens before you! Take this rare Astral Orb for the ultimate trial against Celestiar!',
           },
         },
       },
@@ -232,7 +232,7 @@ const GameData = (() => {
       name: { zh: '青芽狸', en: 'Mosskit' },
       skill: { zh: '飞叶旋风', en: 'Leaf Whisk' },
       desc: { zh: '头顶嫩芽的元气小狸猫，最喜欢在晨露草丛里打滚。', en: 'A cheerful moss fox-kit crowned with a fresh spring sprout.' },
-      hp: 46, atk: 13, spd: 12, catchBase: 0.65,
+      hp: 50, atk: 14, spd: 12, catchBase: 0.65,
       art: { shape: 'fox', c1: '#52c46b', c2: '#d9f99d', c3: '#228b42', accent: '#facc15', ear: 'leaf', tail: 'bushy', aura: '#86efac' },
     },
     {
@@ -240,7 +240,7 @@ const GameData = (() => {
       name: { zh: '橡果犬', en: 'Bramblepup' },
       skill: { zh: '橡果翻滚', en: 'Acorn Roll' },
       desc: { zh: '戴着橡果帽子的勇敢小犬，总能嗅出藏在树林里的宝箱。', en: 'A loyal pup wearing an acorn cap with a nose for hidden chests.' },
-      hp: 50, atk: 14, spd: 10, catchBase: 0.65,
+      hp: 56, atk: 15, spd: 11, catchBase: 0.65,
       art: { shape: 'pup', c1: '#d98a4e', c2: '#fef3c7', c3: '#8c4a1c', accent: '#4ade80', ear: 'floppy', tail: 'curl', aura: '#fde68a' },
     },
     {
@@ -248,23 +248,23 @@ const GameData = (() => {
       name: { zh: '露珠鲤', en: 'Dewfin' },
       skill: { zh: '水泡冲击', en: 'Bubble Splash' },
       desc: { zh: '漂浮在清泉边的小水灵，尾巴甩动时会洒出彩虹露珠。', en: 'A buoyant spring spirit whose fins scatter rainbow dewdrops.' },
-      hp: 48, atk: 13, spd: 13, catchBase: 0.65,
+      hp: 52, atk: 14, spd: 13, catchBase: 0.65,
       art: { shape: 'fin', c1: '#38bdf8', c2: '#e0f2fe', c3: '#0284c7', accent: '#f472b6', ear: 'fin', tail: 'mermaid', aura: '#bae6fd' },
     },
     {
-      id: 'flutterfae', chapter: 1, elem: 'grass', rarity: 'rare',
-      name: { zh: '花语蝶', en: 'Petalwing' },
-      skill: { zh: '花瓣清风', en: 'Pollen Breeze' },
-      desc: { zh: '翅膀如樱花瓣般轻盈的精灵，所过之处百花盛开。', en: 'A blossom-winged sprite that leaves blooming flowers in its wake.' },
-      hp: 44, atk: 15, spd: 16, catchBase: 0.52,
-      art: { shape: 'fae', c1: '#f472b6', c2: '#fce7f3', c3: '#be185d', accent: '#fde047', wing: 'butterfly', aura: '#fbcfe8' },
+      id: 'flutterfae', chapter: 1, elem: 'fire', rarity: 'rare',
+      name: { zh: '炽花蝶', en: 'Emberwing' },
+      skill: { zh: '暖阳花瓣', en: 'Sunpetal Gust' },
+      desc: { zh: '翅膀如暖阳花瓣般闪耀的火精灵，所过之处洒下金色花粉。', en: 'A sun-warmed fire sprite whose wings scatter glowing ember petals.' },
+      hp: 46, atk: 14, spd: 15, catchBase: 0.56,
+      art: { shape: 'fae', c1: '#f97316', c2: '#fef3c7', c3: '#c2410c', accent: '#fde047', wing: 'butterfly', aura: '#fed7aa' },
     },
     {
       id: 'oakstag', chapter: 1, boss: true, elem: 'grass', rarity: 'legend',
       name: { zh: '苍木灵鹿', en: 'Verdant Stag' },
       skill: { zh: '森罗光辉', en: 'Sylvan Radiance' },
       desc: { zh: '翡翠平原的守护神兽，鹿角上开满金色光叶，守护古树灵殿千年。', en: 'Guardian of Emerald Meadow whose antlers bloom with golden leaves.' },
-      hp: 92, atk: 18, spd: 14, catchBase: 0.34,
+      hp: 74, atk: 13, spd: 14, catchBase: 0.34,
       art: { shape: 'stag', c1: '#16a34a', c2: '#dcfce7', c3: '#14532d', accent: '#fbbf24', crown: 'antler', aura: '#4ade80' },
     },
 
@@ -306,7 +306,7 @@ const GameData = (() => {
       name: { zh: '沧澜海龙', en: 'Tidecrest' },
       skill: { zh: '沧海龙卷', en: 'Maelstrom Surge' },
       desc: { zh: '珊瑚海湾的守护海龙，优雅地守护着沉珠秘窟与海上航路。', en: 'Graceful sea dragon guardian of Coral Bay and Sunken Pearl Grotto.' },
-      hp: 118, atk: 23, spd: 18, catchBase: 0.30,
+      hp: 88, atk: 17, spd: 17, catchBase: 0.30,
       art: { shape: 'dragon', c1: '#0284c7', c2: '#bae6fd', c3: '#1e3a8a', accent: '#fde047', wing: 'fin', crown: 'pearl', aura: '#38bdf8' },
     },
 
@@ -348,7 +348,7 @@ const GameData = (() => {
       name: { zh: '烈阳金凤', en: 'Heliowing' },
       skill: { zh: '日冕羽翼', en: 'Corona Flare' },
       desc: { zh: '太阳金字塔的守护金凤，双翼展翅如朝阳破晓，光芒照耀整片沙海。', en: 'Radiant phoenix guardian of the Solar Pyramid Vault.' },
-      hp: 145, atk: 28, spd: 23, catchBase: 0.28,
+      hp: 102, atk: 20, spd: 21, catchBase: 0.28,
       art: { shape: 'bird', c1: '#ef4444', c2: '#fde047', c3: '#991b1b', accent: '#fb923c', wing: 'phoenix', crown: 'sun', aura: '#fb923c' },
     },
 
@@ -390,7 +390,7 @@ const GameData = (() => {
       name: { zh: '寒穹冰龙', en: 'Glacieron' },
       skill: { zh: '永冻星陨', en: 'Permafrost Nova' },
       desc: { zh: '冰冠要塞的传说守护龙，晶翼展动间唤醒整座雪峰的极光。', en: 'Legendary crystal-winged ice dragon ruling Glacial Crown Keep.' },
-      hp: 180, atk: 34, spd: 26, catchBase: 0.25,
+      hp: 118, atk: 24, spd: 24, catchBase: 0.25,
       art: { shape: 'dragon', c1: '#38bdf8', c2: '#f0f9ff', c3: '#1d4ed8', accent: '#c084fc', wing: 'crystal', crown: 'crystal', aura: '#93c5fd' },
     },
 
@@ -432,7 +432,7 @@ const GameData = (() => {
       name: { zh: '星界圣龙', en: 'Celestiar' },
       skill: { zh: '创世星河', en: 'Genesis Starfall' },
       desc: { zh: '艾瑟瑞亚大陆的至高守护圣龙，掌管星辰与五大王国的永恒平衡。', en: 'Supreme celestial dragon guardian watching over all five realms of Aetheria.' },
-      hp: 230, atk: 42, spd: 34, catchBase: 0.24,
+      hp: 132, atk: 27, spd: 28, catchBase: 0.24,
       art: { shape: 'dragon', c1: '#9333ea', c2: '#fef08a', c3: '#4c1d95', accent: '#38bdf8', wing: 'astral', crown: 'halo', aura: '#d8b4fe' },
     },
   ];
@@ -577,14 +577,16 @@ const GameData = (() => {
       id: 'season_pass',
       category: 'chapters',
       featured: true,
+      isBundle: true,
+      creditFrom: ['ch4_pack', 'ch5_pack'],
       emoji: '👑',
       name: { zh: '全章节探险大礼包（激励合集）', en: 'Grand Explorer All-Chapter Bundle' },
       desc: {
-        zh: '观看 4 次激励视频即可一次解锁第 4 章「雪峰古堡」+ 第 5 章「星界神殿」+ 英雄「凛霜女武神」+ 神器「星穹之翼」+ 5 颗圣星球 + 300 金币！',
-        en: 'Watch 4 rewarded ads to unlock Ch.4 Frostpeak + Ch.5 Starlight + Frost Valkyrie Hero + Aether Wings + 5 Astral Orbs + 300 Gold!',
+        zh: '累计观看 4 次激励视频即可一次解锁第 4 章「雪峰古堡」+ 第 5 章「星界神殿」+ 英雄「凛霜女武神」+ 神器「星穹之翼」+ 1 颗圣星球 + 300 金币！',
+        en: 'Watch 4 total rewarded ads to unlock Ch.4 Frostpeak + Ch.5 Starlight + Frost Valkyrie Hero + Aether Wings + 1 Astral Orb + 300 Gold!',
       },
       adCost: 4,
-      grants: { chapters: [4, 5], heroes: ['valkyrie'], tools: ['wings'], items: { masterOrbs: 5, gold: 300 } },
+      grants: { chapters: [4, 5], heroes: ['valkyrie'], tools: ['wings'], items: { masterOrbs: 1, gold: 300 } },
     },
     {
       id: 'ch4_pack',
@@ -604,11 +606,11 @@ const GameData = (() => {
       emoji: '✨',
       name: { zh: '第 5 章：星界神殿终章包', en: 'Chapter 5: Starlight Sanctum Pack' },
       desc: {
-        zh: '观看 3 次激励视频永久解锁苍穹浮岛大陆、星穹王座神殿、5 只星界灵宠与终极神兽「星界圣龙」+ 赠 2 颗圣星球！',
-        en: 'Watch 3 rewarded ads to unlock Starlight Sky Isles, Celestial Throne, 5 Astral Critters & Celestiar Boss + 2 Astral Orbs!',
+        zh: '观看 3 次激励视频永久解锁苍穹浮岛大陆、星穹王座神殿、5 只星界灵宠与终极神兽「星界圣龙」+ 赠 1 颗圣星球！',
+        en: 'Watch 3 rewarded ads to unlock Starlight Sky Isles, Celestial Throne, 5 Astral Critters & Celestiar Boss + 1 Astral Orb!',
       },
       adCost: 3,
-      grants: { chapters: [5], items: { masterOrbs: 2 } },
+      grants: { chapters: [5], items: { masterOrbs: 1 } },
     },
     {
       id: 'hero_valkyrie',
@@ -709,4 +711,5 @@ const GameData = (() => {
     typeMultiplier,
   };
 })();
+if (typeof globalThis !== 'undefined') globalThis.GameData = GameData;
 if (typeof module === 'object' && module.exports) module.exports = GameData;

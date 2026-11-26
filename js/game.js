@@ -1,11 +1,11 @@
 'use strict';
 /* ==========================================================================
- * game.js — Main Loop, Smooth Tile Movement, Interactions, Dungeons,
- * Ambient Biome FX, Compass HUD, Save/Load & Chapter Progression
+ * game.js — Web Main Loop, Smooth Tile Movement, Interactions, Dungeons,
+ * Ambient Biome FX, Compass HUD, Save Schema Validation & Chapter Progression
  * ========================================================================== */
 const Game = (() => {
-  const D = GameData;
-  const $ = id => document.getElementById(id);
+  const getD = () => (typeof GameData !== 'undefined' ? GameData : globalThis.GameData);
+  const $ = id => (typeof document !== 'undefined' ? document.getElementById(id) : null);
 
   let state = null;
   let running = false;
@@ -19,7 +19,7 @@ const Game = (() => {
     dir: 'down',
     walkPhase: 0,
     stepsSinceEncounter: 0,
-    owX: 34, owY: 92, // Remembered overworld position while inside dungeon
+    owX: 34, owY: 92,
   };
 
   // Input state
@@ -33,18 +33,26 @@ const Game = (() => {
   let particles = [];
   let ambient = [];
   let lastGateWarn = -9999;
+  let lastCaughtSpec = null;
+
+  function nowMs() {
+    return typeof performance !== 'undefined' && typeof performance.now === 'function'
+      ? performance.now()
+      : Date.now();
+  }
 
   function defaultState(starterId) {
+    const D = getD();
     const cr = D.CRITTER_BY_ID[starterId] || D.CRITTERS[0];
     const lv = 5;
     const maxHp = cr.hp + lv * 6;
     return {
-      version: 1,
+      version: 2,
       heroId: 'ranger',
       unlockedHeroes: ['ranger'],
-      unlockedChapters: [1, 2, 3], // First THREE chapters completely FREE!
+      unlockedChapters: [1, 2, 3],
       crests: [],
-      tools: ['boots'], // Free Windstep Boots in Chapter 1
+      tools: ['boots'],
       gold: 80,
       items: { orbs: 8, superOrbs: 2, masterOrbs: 0, treats: 5 },
       party: [{ id: cr.id, lv, hp: maxHp, maxHp, exp: 0 }],
@@ -53,12 +61,177 @@ const Game = (() => {
       openedChests: [],
       claimedNpcs: [],
       defeatedBosses: [],
+      claimedBundles: [],
       adProgress: {},
       adViewsTotal: 0,
       mapId: 'overworld',
       x: 34, y: 92,
       owX: 34, owY: 92,
     };
+  }
+
+  function clampInt(n, min, max, fallback) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return fallback;
+    return Math.max(min, Math.min(max, Math.round(v)));
+  }
+
+  function uniqueValidArray(arr, validSet, maxLen) {
+    if (!Array.isArray(arr)) return [];
+    const out = [];
+    for (let i = 0; i < arr.length && out.length < (maxLen || 200); i++) {
+      const v = arr[i];
+      if ((!validSet || validSet.has(v)) && !out.includes(v)) out.push(v);
+    }
+    return out;
+  }
+
+  /**
+   * Validates and sanitizes any loaded save object so corrupt fields or
+   * out-of-chapter coordinates cannot soft-lock or bypass chapter gates.
+   */
+  function sanitizeSave(raw) {
+    const D = getD();
+    const base = defaultState('sproutling');
+    if (!raw || typeof raw !== 'object') return base;
+
+    const validChapters = new Set(D.CHAPTERS.map(c => c.id));
+    const validHeroes = new Set(D.HEROES.map(h => h.id));
+    const validTools = new Set(D.TOOLS.map(t => t.id));
+    const validCritters = new Set(D.CRITTERS.map(c => c.id));
+    const validBundles = new Set(D.PRODUCTS.filter(p => p.isBundle).map(p => p.id));
+
+    const unlockedChapters = uniqueValidArray(raw.unlockedChapters, validChapters, 20);
+    [1, 2, 3].forEach(c => { if (!unlockedChapters.includes(c)) unlockedChapters.push(c); });
+
+    const unlockedHeroes = uniqueValidArray(raw.unlockedHeroes, validHeroes, 20);
+    if (!unlockedHeroes.includes('ranger')) unlockedHeroes.unshift('ranger');
+    const heroId = unlockedHeroes.includes(raw.heroId) ? raw.heroId : 'ranger';
+
+    const tools = uniqueValidArray(raw.tools, validTools, 20);
+    if (!tools.includes('boots')) tools.unshift('boots');
+
+    const crests = uniqueValidArray(raw.crests, validChapters, 20);
+    const defeatedBosses = uniqueValidArray(
+      Array.isArray(raw.defeatedBosses) ? raw.defeatedBosses.concat(crests) : crests,
+      validChapters,
+      20
+    );
+    const claimedBundles = uniqueValidArray(raw.claimedBundles, validBundles, 20);
+
+    const caughtIds = uniqueValidArray(raw.caughtIds, validCritters, 100);
+    const rawParty = Array.isArray(raw.party) ? raw.party.slice(0, 25) : [];
+    const party = [];
+    for (let i = 0; i < rawParty.length; i++) {
+      const p = rawParty[i];
+      if (!p || typeof p !== 'object' || !validCritters.has(p.id)) continue;
+      const lv = clampInt(p.lv, 1, 50, 5);
+      const cr = D.CRITTER_BY_ID[p.id];
+      const maxHp = Math.max(1, clampInt(p.maxHp, 1, 9999, cr.hp + lv * 6));
+      const hp = clampInt(p.hp, 0, maxHp, maxHp);
+      const exp = clampInt(p.exp, 0, 99999, 0);
+      party.push({ id: p.id, lv, hp, maxHp, exp });
+      if (!caughtIds.includes(p.id)) caughtIds.push(p.id);
+    }
+    if (party.length === 0) {
+      party.push(base.party[0]);
+      if (!caughtIds.includes(base.party[0].id)) caughtIds.push(base.party[0].id);
+    }
+    if (party.every(p => p.hp <= 0)) party[0].hp = party[0].maxHp;
+
+    const activePartnerIdx = clampInt(raw.activePartnerIdx, 0, party.length - 1, 0);
+    const rawItems = (raw.items && typeof raw.items === 'object') ? raw.items : {};
+    const items = {
+      orbs: clampInt(rawItems.orbs, 0, 999, 8),
+      superOrbs: clampInt(rawItems.superOrbs, 0, 999, 2),
+      masterOrbs: clampInt(rawItems.masterOrbs, 0, 999, 0),
+      treats: clampInt(rawItems.treats, 0, 999, 5),
+    };
+
+    const adProgress = {};
+    if (raw.adProgress && typeof raw.adProgress === 'object') {
+      Object.keys(raw.adProgress).forEach(k => {
+        if (D.PRODUCT_BY_ID[k]) {
+          adProgress[k] = clampInt(raw.adProgress[k], 0, 20, 0);
+        }
+      });
+    }
+
+    const openedChests = uniqueValidArray(
+      Array.isArray(raw.openedChests) ? raw.openedChests.filter(x => typeof x === 'string') : [],
+      null,
+      200
+    );
+    const claimedNpcs = uniqueValidArray(
+      Array.isArray(raw.claimedNpcs) ? raw.claimedNpcs.filter(x => typeof x === 'string') : [],
+      null,
+      200
+    );
+
+    const sanitized = {
+      version: 2,
+      heroId,
+      unlockedHeroes,
+      unlockedChapters,
+      crests,
+      tools,
+      gold: clampInt(raw.gold, 0, 999999, 80),
+      items,
+      party,
+      activePartnerIdx,
+      caughtIds,
+      openedChests,
+      claimedNpcs,
+      defeatedBosses,
+      claimedBundles,
+      adProgress,
+      adViewsTotal: clampInt(raw.adViewsTotal, 0, 99999, 0),
+      mapId: typeof raw.mapId === 'string' ? raw.mapId : 'overworld',
+      x: clampInt(raw.x, 0, D.MAP_W - 1, 34),
+      y: clampInt(raw.y, 0, D.MAP_H - 1, 92),
+      owX: clampInt(raw.owX, 0, D.MAP_W - 1, 34),
+      owY: clampInt(raw.owY, 0, D.MAP_H - 1, 92),
+    };
+
+    // Validate mapId & coordinates against unlocked chapters and walkability
+    if (typeof World !== 'undefined' && World.getOverworld && World.getOverworld()) {
+      const ch1 = D.getChapter(1);
+      const safeX = ch1.healSpot.x;
+      const safeY = ch1.healSpot.y + 1;
+      const ow = World.getOverworld();
+
+      const owZone = World.getZ(ow, sanitized.owX, sanitized.owY);
+      const prevMap = World.getMap();
+      World.setActiveMap('overworld');
+      if (!sanitized.unlockedChapters.includes(owZone) || !World.isWalkable(sanitized.owX, sanitized.owY, sanitized).ok) {
+        sanitized.owX = safeX;
+        sanitized.owY = safeY;
+      }
+
+      if (sanitized.mapId !== 'overworld') {
+        const dun = World.getDungeon(sanitized.mapId);
+        if (!dun || !sanitized.unlockedChapters.includes(dun.chapterId)) {
+          sanitized.mapId = 'overworld';
+          sanitized.x = safeX;
+          sanitized.y = safeY;
+        } else {
+          World.setActiveMap(sanitized.mapId);
+          if (!World.inb(dun, sanitized.x, sanitized.y) || !World.isWalkable(sanitized.x, sanitized.y, sanitized).ok) {
+            sanitized.x = 11;
+            sanitized.y = 13;
+          }
+        }
+      } else {
+        const curZone = World.getZ(ow, sanitized.x, sanitized.y);
+        if (!sanitized.unlockedChapters.includes(curZone) || !World.isWalkable(sanitized.x, sanitized.y, sanitized).ok) {
+          sanitized.x = safeX;
+          sanitized.y = safeY;
+        }
+      }
+      if (prevMap) World.setActiveMap(prevMap.id);
+    }
+
+    return sanitized;
   }
 
   function getState() { return state; }
@@ -68,24 +241,45 @@ const Game = (() => {
       : { x: player.owX, y: player.owY };
   }
 
+  function getPlayerPos() {
+    return { x: player.x, y: player.y, tx: player.tx, ty: player.ty, dir: player.dir, moving: player.moving };
+  }
+
+  /**
+   * Preserves HP ratio across hero swaps so toggling +HP heroes cannot heal infinitely.
+   */
   function syncPartyStats() {
     if (!state || !state.party) return;
+    const D = getD();
     const hero = D.HERO_BY_ID[state.heroId];
     const hpMult = (hero && hero.perk && hero.perk.hpMult) ? hero.perk.hpMult : 1;
     state.party.forEach(p => {
       const base = D.CRITTER_BY_ID[p.id] || D.CRITTERS[0];
       const newMax = Math.round((base.hp + p.lv * 6) * hpMult);
-      const diff = newMax - (p.maxHp || newMax);
+      const oldMax = p.maxHp || newMax;
+      const ratio = oldMax > 0 ? (p.hp / oldMax) : 1;
       p.maxHp = newMax;
-      p.hp = Math.max(1, Math.min(newMax, p.hp + Math.max(0, diff)));
+      p.hp = p.hp <= 0 ? 0 : Math.max(1, Math.min(newMax, Math.round(ratio * newMax)));
     });
+  }
+
+  function snapshotState() {
+    return state ? JSON.parse(JSON.stringify(state)) : null;
+  }
+
+  function restoreSnapshot(snap) {
+    if (!snap) return;
+    state = snap;
   }
 
   /* ---------------- Initialization & Title Screen ---------------- */
   function init() {
     I18N.init();
     AudioFX.init();
-    Platform.initShareMenu();
+    Platform.initShareMenu(() => ({
+      title: I18N.t('shareTitle', { caught: state && Array.isArray(state.caughtIds) ? state.caughtIds.length : 1 }),
+      query: 'lang=' + I18N.getLang(),
+    }));
     World.init();
 
     UI.bind({
@@ -94,6 +288,10 @@ const Game = (() => {
       warpToChapter,
       grantProduct,
       recordAdProgress,
+      buyHeroWithGold,
+      buyToolWithGold,
+      buySupplyWithGold,
+      equipHero,
       spendGold,
       toast,
       saveAndSync,
@@ -105,76 +303,81 @@ const Game = (() => {
     bindInputs();
     renderTitleScreen();
     initAmbient();
-    requestAnimationFrame(loop);
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(loop);
   }
 
   function renderTitleScreen() {
+    const D = getD();
     const saved = Platform.loadSave();
     const starters = D.CRITTERS.filter(c => c.starter);
-    $('titleMain').textContent = I18N.t('gameTitle');
-    $('titleSub').textContent = I18N.t('gameSubtitle');
-    $('titlePick').textContent = I18N.t('pickStarter');
-    $('titleHint').textContent = I18N.t('titleHint');
-    $('titleLangBtn').textContent = '🌐 ' + I18N.t('langLabel');
+    const setTxt = (id, t) => { const el = $(id); if (el) el.textContent = t; };
+    setTxt('titleMain', I18N.t('gameTitle'));
+    setTxt('titleSub', I18N.t('gameSubtitle'));
+    setTxt('titlePick', I18N.t('pickStarter'));
+    setTxt('titleHint', I18N.t('titleHint'));
+    setTxt('titleLangBtn', '🌐 ' + I18N.t('langLabel'));
 
     const contBtn = $('continueBtn');
-    if (saved && saved.party && saved.party.length) {
-      contBtn.classList.remove('hidden');
-      contBtn.textContent = `▶ ${I18N.t('continueSave')} (${saved.caughtIds.length}/${D.CRITTERS.length} · 🏆${(saved.crests || []).length}/5)`;
-      contBtn.onclick = () => {
-        AudioFX.ensure();
-        AudioFX.sfx.open();
-        startGame(saved);
-      };
-    } else {
-      contBtn.classList.add('hidden');
+    if (contBtn) {
+      if (saved && Array.isArray(saved.party) && saved.party.length) {
+        const caughtCount = Array.isArray(saved.caughtIds) ? saved.caughtIds.length : saved.party.length;
+        const crestCount = Array.isArray(saved.crests) ? saved.crests.length : 0;
+        contBtn.classList.remove('hidden');
+        contBtn.textContent = `▶ ${I18N.t('continueSave')} (${caughtCount}/${D.CRITTERS.length} · 🏆${crestCount}/5)`;
+        contBtn.onclick = () => {
+          AudioFX.ensure();
+          AudioFX.sfx.open();
+          startGame(saved);
+        };
+      } else {
+        contBtn.classList.add('hidden');
+      }
     }
 
-    $('starters').innerHTML = starters.map(c => `
-      <button class="starter-card" data-starter="${c.id}">
-        <img src="${Art.getCritterPortrait(c.id)}" alt="">
-        <b>${I18N.pick(c.name)}</b>
-        <span class="elem-tag ${c.elem}">${I18N.t('elemNames')[c.elem]}</span>
-        <small>${I18N.pick(c.skill)}</small>
-      </button>`).join('');
+    const startersEl = $('starters');
+    if (startersEl) {
+      startersEl.innerHTML = starters.map(c => `
+        <button class="starter-card" data-starter="${c.id}">
+          <img src="${Art.getCritterPortrait(c.id)}" alt="">
+          <b>${I18N.pick(c.name)}</b>
+          <span class="elem-tag ${c.elem}">${I18N.t('elemNames')[c.elem]}</span>
+          <small>${I18N.pick(c.skill)}</small>
+        </button>`).join('');
 
-    $('starters').querySelectorAll('[data-starter]').forEach(btn => {
-      btn.onclick = () => {
-        AudioFX.ensure();
-        AudioFX.sfx.unlock();
-        startGame(defaultState(btn.dataset.starter));
+      startersEl.querySelectorAll('[data-starter]').forEach(btn => {
+        btn.onclick = () => {
+          AudioFX.ensure();
+          AudioFX.sfx.unlock();
+          startGame(defaultState(btn.dataset.starter));
+        };
+      });
+    }
+
+    const titleLangBtn = $('titleLangBtn');
+    if (titleLangBtn) {
+      titleLangBtn.onclick = () => {
+        I18N.toggleLang();
+        renderTitleScreen();
       };
-    });
+    }
 
-    $('titleLangBtn').onclick = () => {
-      I18N.toggleLang();
-      renderTitleScreen();
-    };
-
-    $('title').classList.remove('hidden');
+    const titleEl = $('title');
+    if (titleEl) titleEl.classList.remove('hidden');
   }
 
   function startGame(loadedState) {
-    state = loadedState;
-    state.unlockedChapters = state.unlockedChapters || [1, 2, 3];
-    state.unlockedHeroes = state.unlockedHeroes || ['ranger'];
-    state.tools = state.tools || ['boots'];
-    state.crests = state.crests || [];
-    state.openedChests = state.openedChests || [];
-    state.claimedNpcs = state.claimedNpcs || [];
-    state.defeatedBosses = state.defeatedBosses || [];
-    state.adProgress = state.adProgress || {};
-    state.adViewsTotal = state.adViewsTotal || 0;
+    state = sanitizeSave(loadedState);
     syncPartyStats();
 
     World.setActiveMap(state.mapId || 'overworld');
-    player.x = player.tx = state.x || 34;
-    player.y = player.ty = state.y || 92;
-    player.owX = state.owX || 34;
-    player.owY = state.owY || 92;
+    player.x = player.tx = state.x;
+    player.y = player.ty = state.y;
+    player.owX = state.owX;
+    player.owY = state.owY;
     player.moving = false;
 
-    $('title').classList.add('hidden');
+    const titleEl = $('title');
+    if (titleEl) titleEl.classList.add('hidden');
     running = true;
     refreshLabels();
     saveAndSync();
@@ -183,85 +386,105 @@ const Game = (() => {
 
   /* ---------------- Save, HUD & Labels ---------------- */
   function saveAndSync() {
-    if (!state) return;
+    if (!state) return false;
     state.mapId = World.getMap().id;
     state.x = Math.round(player.tx);
     state.y = Math.round(player.ty);
     state.owX = player.owX;
     state.owY = player.owY;
-    Platform.writeSave(state);
+    const ok = Platform.writeSave(state);
     syncHud();
+    return ok;
   }
 
   function syncHud() {
     if (!state) return;
+    const D = getD();
     const p = state.party[state.activePartnerIdx] || state.party[0];
     const cr = D.CRITTER_BY_ID[p.id];
-    $('pcImg').src = Art.getCritterPortrait(p.id);
-    $('pcName').textContent = I18N.pick(cr.name);
-    $('pcLv').textContent = 'Lv.' + p.lv;
-    $('pcHp').style.width = Math.max(0, Math.round((p.hp / p.maxHp) * 100)) + '%';
-    $('pcHpTxt').textContent = `${p.hp}/${p.maxHp}`;
+    const setTxt = (id, t) => { const el = $(id); if (el) el.textContent = t; };
 
-    $('gold').textContent = state.gold;
-    $('orbs').textContent = state.items.orbs;
-    $('superOrbs').textContent = state.items.superOrbs;
-    $('masterOrbs').textContent = state.items.masterOrbs;
-    $('dexCount').textContent = `${state.caughtIds.length}/${D.CRITTERS.length}`;
-    $('muteBtn').textContent = AudioFX.isMuted() ? '🔇' : '🔊';
-    $('langBtn').textContent = I18N.t('langLabel');
+    const pcImg = $('pcImg');
+    if (pcImg) pcImg.src = Art.getCritterPortrait(p.id);
+    setTxt('pcName', I18N.pick(cr.name));
+    setTxt('pcLv', 'Lv.' + p.lv);
+    const pcHp = $('pcHp');
+    if (pcHp && pcHp.style) pcHp.style.width = Math.max(0, Math.round((p.hp / p.maxHp) * 100)) + '%';
+    setTxt('pcHpTxt', `${p.hp}/${p.maxHp}`);
 
-    // Fancy Tool Belt quick badges
+    setTxt('gold', state.gold);
+    setTxt('orbs', state.items.orbs);
+    setTxt('superOrbs', state.items.superOrbs);
+    setTxt('masterOrbs', state.items.masterOrbs);
+    setTxt('dexCount', `${state.caughtIds.length}/${D.CRITTERS.length}`);
+    setTxt('muteBtn', AudioFX.isMuted() ? '🔇' : '🔊');
+    setTxt('langBtn', I18N.t('langLabel'));
+
     const belt = $('toolBelt');
-    belt.innerHTML = state.tools.map(tid => {
-      const tl = D.TOOL_BY_ID[tid];
-      return tl ? `<span class="tool-pill" title="${I18N.pick(tl.name)}">${tl.emoji}</span>` : '';
-    }).join('');
+    if (belt) {
+      belt.innerHTML = state.tools.map(tid => {
+        const tl = D.TOOL_BY_ID[tid];
+        return tl ? `<span class="tool-pill" title="${I18N.pick(tl.name)}">${tl.emoji}</span>` : '';
+      }).join('');
+    }
 
     updateCompass();
   }
 
   function refreshLabels() {
-    $('mapLbl').textContent = I18N.t('worldMap');
-    $('dexLbl').textContent = I18N.t('dex');
-    $('bagLbl').textContent = I18N.t('bag');
-    $('shopLbl').textContent = I18N.t('shop');
-    $('btnBLabel').textContent = I18N.t('dash');
-    $('btnALabel').textContent = I18N.t('interactShort');
+    const setTxt = (id, t) => { const el = $(id); if (el) el.textContent = t; };
+    setTxt('mapLbl', I18N.t('worldMap'));
+    setTxt('dexLbl', I18N.t('dex'));
+    setTxt('bagLbl', I18N.t('bag'));
+    setTxt('shopLbl', I18N.t('shop'));
+    setTxt('btnBLabel', I18N.t('dash'));
+    setTxt('btnALabel', I18N.t('interactShort'));
     syncHud();
-    updateChapterContext(false);
+    if (state) updateChapterContext(false);
+    if (typeof Battle !== 'undefined' && Battle.isActive()) Battle.refreshLang();
+    if (typeof UI !== 'undefined' && UI.refreshActiveModal) UI.refreshActiveModal();
+    if (lastCaughtSpec) {
+      const cele = $('celebrate');
+      if (cele && !cele.classList.contains('hidden')) renderCelebrateOverlay(lastCaughtSpec.id, lastCaughtSpec.lv);
+    }
   }
 
   function toast(msg) {
+    const container = $('toasts');
+    if (!container || typeof document === 'undefined') return;
     const el = document.createElement('div');
     el.className = 'toast';
     el.textContent = msg;
-    $('toasts').appendChild(el);
+    container.appendChild(el);
     setTimeout(() => el.classList.add('fade'), 2400);
     setTimeout(() => el.remove(), 2900);
   }
 
   function showDialog(speaker, emoji, text, onDone) {
     dialogOpen = true;
-    dialogOpenedAt = performance.now();
+    dialogOpenedAt = nowMs();
     dialogCallback = onDone || null;
-    $('dlgFace').textContent = emoji || '💬';
-    $('dlgName').textContent = speaker;
-    $('dlgText').textContent = text;
-    $('dialog').classList.remove('hidden');
+    const setTxt = (id, t) => { const el = $(id); if (el) el.textContent = t; };
+    setTxt('dlgFace', emoji || '💬');
+    setTxt('dlgName', speaker);
+    setTxt('dlgText', text);
+    const dlg = $('dialog');
+    if (dlg) dlg.classList.remove('hidden');
   }
 
   function closeDialog(force) {
-    if (!dialogOpen) return;
-    if (!force && performance.now() - dialogOpenedAt < 220) return;
+    if (!dialogOpen) return false;
+    if (!force && nowMs() - dialogOpenedAt < 220) return false;
     dialogOpen = false;
-    $('dialog').classList.add('hidden');
+    const dlg = $('dialog');
+    if (dlg) dlg.classList.add('hidden');
     const cb = dialogCallback;
     dialogCallback = null;
     if (cb) cb();
+    return true;
   }
 
-  /* ---------------- Store Grants & Economy ---------------- */
+  /* ---------------- Store Grants & Economy (With Save Rollback) ---------------- */
   function spendGold(amount) {
     if (state.gold < amount) {
       AudioFX.sfx.locked();
@@ -272,7 +495,75 @@ const Game = (() => {
     return true;
   }
 
-  function grantProduct(prod) {
+  function buyHeroWithGold(hero) {
+    if (!hero) return false;
+    const snap = snapshotState();
+    if (!spendGold(hero.goldPrice)) return false;
+    if (!state.unlockedHeroes.includes(hero.id)) state.unlockedHeroes.push(hero.id);
+    state.heroId = hero.id;
+    syncPartyStats();
+    if (!saveAndSync()) {
+      restoreSnapshot(snap);
+      syncHud();
+      AudioFX.sfx.locked();
+      toast(I18N.t('saveFailedToast'));
+      return false;
+    }
+    AudioFX.sfx.unlock();
+    toast(I18N.t('unlockedToast', { name: I18N.pick(hero.name) }));
+    return true;
+  }
+
+  function equipHero(heroId) {
+    const snap = snapshotState();
+    state.heroId = heroId;
+    syncPartyStats();
+    if (!saveAndSync()) {
+      restoreSnapshot(snap);
+      syncHud();
+      AudioFX.sfx.locked();
+      toast(I18N.t('saveFailedToast'));
+      return false;
+    }
+    AudioFX.sfx.tap();
+    return true;
+  }
+
+  function buyToolWithGold(tl) {
+    if (!tl) return false;
+    const snap = snapshotState();
+    if (!spendGold(tl.goldPrice)) return false;
+    if (!state.tools.includes(tl.id)) state.tools.push(tl.id);
+    if (!saveAndSync()) {
+      restoreSnapshot(snap);
+      syncHud();
+      AudioFX.sfx.locked();
+      toast(I18N.t('saveFailedToast'));
+      return false;
+    }
+    AudioFX.sfx.unlock();
+    toast(I18N.t('unlockedToast', { name: I18N.pick(tl.name) }));
+    return true;
+  }
+
+  function buySupplyWithGold(sp) {
+    if (!sp) return false;
+    const snap = snapshotState();
+    if (!spendGold(sp.price)) return false;
+    state.items[sp.id] = (state.items[sp.id] || 0) + sp.amount;
+    if (!saveAndSync()) {
+      restoreSnapshot(snap);
+      syncHud();
+      AudioFX.sfx.locked();
+      toast(I18N.t('saveFailedToast'));
+      return false;
+    }
+    AudioFX.sfx.chest();
+    toast(I18N.t('boughtToast', { name: I18N.pick(sp.name) }));
+    return true;
+  }
+
+  function applyProductGrants(prod) {
     const g = prod.grants || {};
     if (g.chapters) {
       g.chapters.forEach(cid => {
@@ -297,33 +588,77 @@ const Game = (() => {
         else state.items[k] = (state.items[k] || 0) + g.items[k];
       });
     }
+    if (prod.isBundle) {
+      state.claimedBundles = state.claimedBundles || [];
+      if (!state.claimedBundles.includes(prod.id)) state.claimedBundles.push(prod.id);
+    }
+  }
+
+  function grantProduct(prod) {
+    const snap = snapshotState();
+    applyProductGrants(prod);
+    if (!saveAndSync()) {
+      restoreSnapshot(snap);
+      syncHud();
+      AudioFX.sfx.locked();
+      toast(I18N.t('saveFailedToast'));
+      return false;
+    }
     AudioFX.sfx.unlock();
     Platform.vibrateShort();
     toast(I18N.t('unlockedToast', { name: I18N.pick(prod.name) }));
     spawnBurst(player.x, player.y, '#fde047', 24);
-    saveAndSync();
+    return true;
   }
 
   function recordAdProgress(prod) {
+    const snap = snapshotState();
     state.adViewsTotal = (state.adViewsTotal || 0) + 1;
     if (prod.repeatable) {
-      grantProduct(prod);
-      return;
+      applyProductGrants(prod);
+      if (!saveAndSync()) {
+        restoreSnapshot(snap);
+        syncHud();
+        AudioFX.sfx.locked();
+        toast(I18N.t('saveFailedToast'));
+        return false;
+      }
+      AudioFX.sfx.unlock();
+      Platform.vibrateShort();
+      toast(I18N.t('unlockedToast', { name: I18N.pick(prod.name) }));
+      spawnBurst(player.x, player.y, '#fde047', 24);
+      return true;
     }
+
     state.adProgress = state.adProgress || {};
-    const done = (state.adProgress[prod.id] || 0) + 1;
-    state.adProgress[prod.id] = done;
-    if (done >= (prod.adCost || 1)) {
-      grantProduct(prod);
+    state.adProgress[prod.id] = (state.adProgress[prod.id] || 0) + 1;
+    const done = UI.getEffectiveAdProgress(prod, state);
+    const unlockedNow = done >= (prod.adCost || 1);
+    if (unlockedNow) applyProductGrants(prod);
+
+    if (!saveAndSync()) {
+      restoreSnapshot(snap);
+      syncHud();
+      AudioFX.sfx.locked();
+      toast(I18N.t('saveFailedToast'));
+      return false;
+    }
+
+    if (unlockedNow) {
+      AudioFX.sfx.unlock();
+      Platform.vibrateShort();
+      toast(I18N.t('unlockedToast', { name: I18N.pick(prod.name) }));
+      spawnBurst(player.x, player.y, '#fde047', 24);
     } else {
       AudioFX.sfx.tap();
       toast(I18N.t('adProgressToast', { done, cost: prod.adCost }));
-      saveAndSync();
     }
+    return true;
   }
 
   /* ---------------- Chapter Detection, Fast Travel & Compass ---------------- */
   function updateChapterContext(playMusic) {
+    const D = getD();
     const m = World.getMap();
     const chId = m.isDungeon ? m.chapterId : World.getZ(m, Math.round(player.x), Math.round(player.y));
     const ch = D.getChapter(chId);
@@ -331,10 +666,12 @@ const Game = (() => {
     currentChapterId = chId;
 
     const banner = $('chapterBanner');
-    if (m.isDungeon) {
-      banner.textContent = `🌀 ${I18N.pick(ch.dungeon.name)} · ${I18N.t('chapterPrefix', { n: ch.id })}`;
-    } else {
-      banner.textContent = `${ch.emoji} ${I18N.t('chapterPrefix', { n: ch.id })} · ${I18N.pick(ch.name)}`;
+    if (banner) {
+      if (m.isDungeon) {
+        banner.textContent = `🌀 ${I18N.pick(ch.dungeon.name)} · ${I18N.t('chapterPrefix', { n: ch.id })}`;
+      } else {
+        banner.textContent = `${ch.emoji} ${I18N.t('chapterPrefix', { n: ch.id })} · ${I18N.pick(ch.name)}`;
+      }
     }
     if (playMusic || changed) {
       AudioFX.playBgm(m.isDungeon ? 'dungeon' : ch.bgm);
@@ -342,15 +679,16 @@ const Game = (() => {
   }
 
   function warpToChapter(chapterId) {
+    const D = getD();
     if (!state.unlockedChapters.includes(chapterId)) {
       UI.openGateLockModal(chapterId);
-      return;
+      return false;
     }
     if (!state.tools.includes('wings')) {
       AudioFX.sfx.locked();
       toast(I18N.t('fastTravelLocked'));
       UI.openStore('tools');
-      return;
+      return false;
     }
     const ch = D.getChapter(chapterId);
     World.setActiveMap('overworld');
@@ -364,10 +702,12 @@ const Game = (() => {
     toast(I18N.t('fastTravelDone', { name: I18N.pick(ch.name) }));
     updateChapterContext(true);
     saveAndSync();
+    return true;
   }
 
   function updateCompass() {
     const bar = $('compassBar');
+    if (!bar) return;
     if (!state || !state.tools.includes('compass')) {
       bar.classList.add('hidden');
       return;
@@ -416,20 +756,21 @@ const Game = (() => {
     const ny = Math.round(player.y) + dy;
     const check = World.isWalkable(nx, ny, state);
     if (!check.ok) {
-      if (check.reason === 'gate' && performance.now() - lastGateWarn > 1400) {
-        lastGateWarn = performance.now();
+      if (check.reason === 'gate' && nowMs() - lastGateWarn > 1400) {
+        lastGateWarn = nowMs();
         AudioFX.sfx.locked();
         UI.openGateLockModal(check.chapter);
-      } else if (check.reason === 'water' && performance.now() - lastGateWarn > 2200) {
-        lastGateWarn = performance.now();
+      } else if (check.reason === 'water' && nowMs() - lastGateWarn > 2200) {
+        lastGateWarn = nowMs();
         toast(I18N.t('waterBlocked'));
       }
-      return;
+      return false;
     }
     player.tx = nx;
     player.ty = ny;
     player.moving = true;
     AudioFX.sfx.step();
+    return true;
   }
 
   function onStepComplete() {
@@ -438,7 +779,6 @@ const Game = (() => {
     updateChapterContext(false);
     updateCompass();
 
-    // Check Portal / Dungeon Entrance / Exit Mat
     const obj = World.hasObjAt(m, px, py);
     if (obj && obj.action === 'enter_dungeon') {
       player.owX = px;
@@ -465,7 +805,6 @@ const Game = (() => {
       return;
     }
 
-    // Check Wild Encounter in Tall Grass
     const tile = World.getT(m, px, py);
     if (tile === World.T.TALL) {
       player.stepsSinceEncounter++;
@@ -476,10 +815,17 @@ const Game = (() => {
     }
   }
 
+  function isOverlayOpen() {
+    const modal = $('modal');
+    const cele = $('celebrate');
+    return (modal && !modal.classList.contains('hidden')) || (cele && !cele.classList.contains('hidden'));
+  }
+
   function interact() {
     if (dialogOpen) { closeDialog(false); return; }
-    if (!running || Battle.isActive() || !$('modal').classList.contains('hidden') || !$('celebrate').classList.contains('hidden')) return;
+    if (!running || Battle.isActive() || isOverlayOpen()) return;
 
+    const D = getD();
     const m = World.getMap();
     const px = Math.round(player.x), py = Math.round(player.y);
     const [dx, dy] = dirDelta(player.dir);
@@ -488,7 +834,6 @@ const Game = (() => {
     for (let i = 0; i < targets.length; i++) {
       const [tx, ty] = targets[i];
 
-      // 1. Standing Guardian Boss in Dungeon
       if (m.boss && m.boss.x === tx && m.boss.y === ty) {
         const cr = D.CRITTER_BY_ID[m.boss.critterId];
         showDialog(I18N.pick(cr.name), '👑', I18N.pick(cr.desc), () => {
@@ -497,7 +842,6 @@ const Game = (() => {
         return;
       }
 
-      // 2. Treasure Chest
       const chest = World.hasChestAt(m, tx, ty);
       if (chest) {
         if (state.openedChests.includes(chest.id)) {
@@ -524,7 +868,6 @@ const Game = (() => {
         return;
       }
 
-      // 3. NPC
       const npc = World.hasNpcAt(m, tx, ty);
       if (npc) {
         AudioFX.sfx.tap();
@@ -555,7 +898,6 @@ const Game = (() => {
         return;
       }
 
-      // 4. Interactive Object (Fountain, Shop House, Waystone, Sign, Portal)
       const obj = World.hasObjAt(m, tx, ty);
       if (obj && obj.action) {
         if (obj.action === 'heal') {
@@ -571,7 +913,6 @@ const Game = (() => {
         if (obj.action === 'sign') { showDialog('🪧', '🪧', I18N.pick(obj.data.text)); return; }
       }
 
-      // 5. Locked Chapter Gate
       const tile = World.getT(m, tx, ty);
       if (tile === World.T.GATE_CH4 && !state.unlockedChapters.includes(4)) { UI.openGateLockModal(4); return; }
       if (tile === World.T.GATE_CH5 && !state.unlockedChapters.includes(5)) { UI.openGateLockModal(5); return; }
@@ -580,6 +921,7 @@ const Game = (() => {
 
   /* ---------------- Battles & Capture Celebration ---------------- */
   function triggerWildEncounter() {
+    const D = getD();
     const m = World.getMap();
     const ch = D.getChapter(currentChapterId);
     const pool = m.isDungeon ? ch.dungeon.wildPool : ch.wildPool;
@@ -604,6 +946,7 @@ const Game = (() => {
   }
 
   function startBattle(critterId, lv, isBoss, chId) {
+    const D = getD();
     player.moving = false;
     Battle.start(state, critterId, lv, isBoss, chId, res => {
       if (res.result === 'fainted') {
@@ -612,12 +955,16 @@ const Game = (() => {
         World.setActiveMap('overworld');
         player.x = player.tx = ch.healSpot.x;
         player.y = player.ty = ch.healSpot.y + 1;
+        player.owX = player.x;
+        player.owY = player.y;
         toast(I18N.t('battleAllFainted'));
       } else if (res.result === 'caught') {
         addCaughtCritter(res.critterId, res.lv);
       }
       if ((res.result === 'win' || res.result === 'caught') && res.isBoss) {
         const ch = D.getChapter(res.chapterId);
+        state.defeatedBosses = state.defeatedBosses || [];
+        if (!state.defeatedBosses.includes(ch.id)) state.defeatedBosses.push(ch.id);
         if (!state.crests.includes(ch.id)) {
           state.crests.push(ch.id);
           AudioFX.sfx.unlock();
@@ -629,34 +976,48 @@ const Game = (() => {
     });
   }
 
+  function renderCelebrateOverlay(critterId, lv) {
+    const D = getD();
+    const cr = D.CRITTER_BY_ID[critterId];
+    if (!cr) return;
+    const setTxt = (id, t) => { const el = $(id); if (el) el.textContent = t; };
+    setTxt('celeTitle', I18N.t('gotchaTitle'));
+    const img = $('celeImg');
+    if (img) img.src = Art.getCritterPortrait(critterId);
+    setTxt('celeName', `${I18N.pick(cr.name)} (Lv.${lv})`);
+    setTxt('celeDesc', I18N.pick(cr.desc));
+    setTxt('celeOk', I18N.t('gotchaOk'));
+    setTxt('celePartner', I18N.t('gotchaPartner'));
+  }
+
   function addCaughtCritter(critterId, lv) {
     if (!state.caughtIds.includes(critterId)) state.caughtIds.push(critterId);
     const existing = state.party.find(p => p.id === critterId);
     let newIdx = state.party.length;
     if (!existing) {
-      const st = Battle.calcStats(critterId, lv, true);
+      const st = Battle.calcStats(critterId, lv, true, state);
       state.party.push({ id: critterId, lv, hp: st.maxHp, maxHp: st.maxHp, exp: 0 });
     } else {
       newIdx = state.party.indexOf(existing);
       existing.lv = Math.max(existing.lv, lv);
-      const st = Battle.calcStats(critterId, existing.lv, true);
+      const st = Battle.calcStats(critterId, existing.lv, true, state);
       existing.maxHp = st.maxHp;
       existing.hp = st.maxHp;
     }
-    const cr = D.CRITTER_BY_ID[critterId];
-    $('celeTitle').textContent = I18N.t('gotchaTitle');
-    $('celeImg').src = Art.getCritterPortrait(critterId);
-    $('celeName').textContent = `${I18N.pick(cr.name)} (Lv.${lv})`;
-    $('celeDesc').textContent = I18N.pick(cr.desc);
-    $('celeOk').textContent = I18N.t('gotchaOk');
-    $('celePartner').textContent = I18N.t('gotchaPartner');
-    $('celebrate').classList.remove('hidden');
-    $('celeOk').onclick = () => $('celebrate').classList.add('hidden');
-    $('celePartner').onclick = () => {
-      state.activePartnerIdx = newIdx;
-      saveAndSync();
-      $('celebrate').classList.add('hidden');
-    };
+    lastCaughtSpec = { id: critterId, lv };
+    renderCelebrateOverlay(critterId, lv);
+    const cele = $('celebrate');
+    if (cele) cele.classList.remove('hidden');
+    const okBtn = $('celeOk');
+    if (okBtn) okBtn.onclick = () => { if (cele) cele.classList.add('hidden'); };
+    const partnerBtn = $('celePartner');
+    if (partnerBtn) {
+      partnerBtn.onclick = () => {
+        state.activePartnerIdx = newIdx;
+        saveAndSync();
+        if (cele) cele.classList.add('hidden');
+      };
+    }
   }
 
   /* ---------------- Particles & Ambient Weather ---------------- */
@@ -678,13 +1039,13 @@ const Game = (() => {
   /* ---------------- Main 60fps Game & Render Loop ---------------- */
   function loop() {
     time += 0.016;
-    if (running && !Battle.isActive() && $('modal').classList.contains('hidden') && $('celebrate').classList.contains('hidden')) {
+    if (running && !Battle.isActive() && !isOverlayOpen()) {
       updateMovement();
     }
     if (running && !Battle.isActive()) {
       renderWorld();
     }
-    requestAnimationFrame(loop);
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(loop);
   }
 
   function updateMovement() {
@@ -720,10 +1081,12 @@ const Game = (() => {
 
   function renderWorld() {
     const cv = $('world');
+    if (!cv || typeof cv.getContext !== 'function') return;
     const c = cv.getContext('2d');
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
+    if (!c) return;
+    const dpr = Math.min(2, (typeof window !== 'undefined' && window.devicePixelRatio) || 1);
+    const vw = (typeof window !== 'undefined' && window.innerWidth) || 800;
+    const vh = (typeof window !== 'undefined' && window.innerHeight) || 600;
     if (cv.width !== vw * dpr || cv.height !== vh * dpr) {
       cv.width = vw * dpr; cv.height = vh * dpr;
     }
@@ -743,7 +1106,6 @@ const Game = (() => {
     const x1 = Math.min(m.w - 1, Math.ceil((camX + vw) / S) + 1);
     const y1 = Math.min(m.h - 1, Math.ceil((camY + vh) / S) + 1);
 
-    // 1. Tiles
     for (let y = y0; y <= y1; y++) {
       for (let x = x0; x <= x1; x++) {
         const px = Math.floor(x * S - camX);
@@ -752,38 +1114,32 @@ const Game = (() => {
       }
     }
 
-    // 2. Objects
     m.objects.forEach(o => {
       if (o.x + (o.w || 1) < x0 || o.x > x1 || o.y + (o.h || 1) < y0 || o.y > y1) return;
       Art.drawObject(c, o, Math.floor(o.x * S - camX), Math.floor(o.y * S - camY), S, time);
     });
 
-    // 3. Chests
     m.chests.forEach(ch => {
       if (ch.x < x0 || ch.x > x1 || ch.y < y0 || ch.y > y1) return;
       Art.drawChest(c, state.openedChests.includes(ch.id), Math.floor(ch.x * S - camX), Math.floor(ch.y * S - camY), S, time);
     });
 
-    // 4. NPCs
     m.npcs.forEach(n => {
       if (n.x < x0 || n.x > x1 || n.y < y0 || n.y > y1) return;
       const hasGift = (n.gift && !state.claimedNpcs.includes(n.id)) || (n.questTool && !state.tools.includes(n.questTool));
       Art.drawNpc(c, n, Math.floor(n.x * S - camX), Math.floor(n.y * S - camY), S, time, hasGift);
     });
 
-    // 5. Standing Dungeon Guardian Boss
     if (m.boss) {
       const bx = m.boss.x * S - camX + S * 0.5;
       const by = m.boss.y * S - camY + S * 0.45;
       Art.drawCritter(c, m.boss.critterId, bx, by, S * 2.1, time, false);
     }
 
-    // 6. Hero + Fancy Tool FX
     const curTile = World.getT(m, Math.round(player.x), Math.round(player.y));
     const isSurfing = curTile === World.T.SHALLOW;
     Art.drawHero(c, state.heroId, player.x * S - camX, player.y * S - camY, S, player.dir, player.walkPhase, time, state.tools, isSurfing);
 
-    // 7. World Particles
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
       p.x += p.vx; p.y += p.vy; p.life -= 0.03;
@@ -794,7 +1150,6 @@ const Game = (() => {
     }
     c.globalAlpha = 1;
 
-    // 8. Subtle Biome Ambient Weather (Blossoms / Snowflakes / Stardust)
     if (!m.isDungeon && (currentChapterId === 1 || currentChapterId === 4 || currentChapterId === 5)) {
       const col = currentChapterId === 4 ? 'rgba(255,255,255,0.85)' : currentChapterId === 5 ? 'rgba(254,240,138,0.8)' : 'rgba(255,220,235,0.75)';
       c.fillStyle = col;
@@ -811,9 +1166,10 @@ const Game = (() => {
 
   /* ---------------- Input Binding (Keyboard + Touch D-Pad + Buttons) ---------------- */
   function bindInputs() {
+    if (typeof window === 'undefined') return;
     window.addEventListener('keydown', e => {
       keys[e.code] = true;
-      if (running && !dialogOpen && !Battle.isActive() && $('modal').classList.contains('hidden') && $('celebrate').classList.contains('hidden') && !player.moving) {
+      if (running && !dialogOpen && !Battle.isActive() && !isOverlayOpen() && !player.moving) {
         const keyDir = e.code === 'ArrowUp' || e.code === 'KeyW' ? 'up'
           : e.code === 'ArrowDown' || e.code === 'KeyS' ? 'down'
           : e.code === 'ArrowLeft' || e.code === 'KeyA' ? 'left'
@@ -821,14 +1177,19 @@ const Game = (() => {
         if (keyDir) tryStep(keyDir);
       }
       if (e.code === 'Space' || e.code === 'Enter' || e.code === 'KeyZ') {
-        if (dialogOpen) { e.preventDefault(); closeDialog(true); }
-        else if (running && !Battle.isActive() && $('modal').classList.contains('hidden')) { e.preventDefault(); interact(); }
+        if (dialogOpen) {
+          e.preventDefault();
+          closeDialog(false); // Debounced (220ms) so double-Space never skips dialogs
+        } else if (running && !Battle.isActive() && !isOverlayOpen()) {
+          e.preventDefault();
+          interact();
+        }
       }
       if (e.code === 'Escape') {
         if (dialogOpen) closeDialog(true);
         else UI.closeModal();
       }
-      if (Battle.isActive()) {
+      if (Battle.isActive() && !Battle.isMenuOpen() && !Battle.isBusy()) {
         if (e.key === '1') Battle.handleAction('attack');
         if (e.key === '2') Battle.handleAction('catch');
         if (e.key === '3') Battle.handleAction('feed');
@@ -837,48 +1198,55 @@ const Game = (() => {
     });
     window.addEventListener('keyup', e => { keys[e.code] = false; });
 
-    // Touch & Pointer D-Pad
     const dpad = $('dpad');
-    const calcDpad = e => {
-      const rect = dpad.getBoundingClientRect();
-      const pt = e.touches ? e.touches[0] : e;
-      const dx = pt.clientX - (rect.left + rect.width / 2);
-      const dy = pt.clientY - (rect.top + rect.height / 2);
-      if (Math.hypot(dx, dy) < 10) { dpadDir = null; return; }
-      dpadDir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
-    };
-    let dpadDown = false;
-    dpad.addEventListener('pointerdown', e => { e.preventDefault(); AudioFX.ensure(); dpadDown = true; dpad.setPointerCapture(e.pointerId); calcDpad(e); });
-    dpad.addEventListener('pointermove', e => { if (dpadDown) calcDpad(e); });
-    const stopDpad = () => { dpadDown = false; dpadDir = null; };
-    dpad.addEventListener('pointerup', stopDpad);
-    dpad.addEventListener('pointercancel', stopDpad);
+    if (dpad) {
+      const calcDpad = e => {
+        const rect = dpad.getBoundingClientRect();
+        const pt = e.touches ? e.touches[0] : e;
+        const dx = pt.clientX - (rect.left + rect.width / 2);
+        const dy = pt.clientY - (rect.top + rect.height / 2);
+        if (Math.hypot(dx, dy) < 10) { dpadDir = null; return; }
+        dpadDir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
+      };
+      let dpadDown = false;
+      dpad.addEventListener('pointerdown', e => { e.preventDefault(); AudioFX.ensure(); dpadDown = true; if (dpad.setPointerCapture) dpad.setPointerCapture(e.pointerId); calcDpad(e); });
+      dpad.addEventListener('pointermove', e => { if (dpadDown) calcDpad(e); });
+      const stopDpad = () => { dpadDown = false; dpadDir = null; };
+      dpad.addEventListener('pointerup', stopDpad);
+      dpad.addEventListener('pointercancel', stopDpad);
+    }
 
-    // A / B Buttons
-    $('btnA').addEventListener('pointerdown', e => { e.preventDefault(); AudioFX.ensure(); interact(); });
-    $('btnB').addEventListener('pointerdown', e => { e.preventDefault(); AudioFX.ensure(); dashHeld = true; });
-    const stopB = () => { dashHeld = false; };
-    $('btnB').addEventListener('pointerup', stopB);
-    $('btnB').addEventListener('pointerleave', stopB);
-    $('btnB').addEventListener('pointercancel', stopB);
+    const btnA = $('btnA');
+    if (btnA) btnA.addEventListener('pointerdown', e => { e.preventDefault(); AudioFX.ensure(); interact(); });
+    const btnB = $('btnB');
+    if (btnB) {
+      btnB.addEventListener('pointerdown', e => { e.preventDefault(); AudioFX.ensure(); dashHeld = true; });
+      const stopB = () => { dashHeld = false; };
+      btnB.addEventListener('pointerup', stopB);
+      btnB.addEventListener('pointerleave', stopB);
+      btnB.addEventListener('pointercancel', stopB);
+    }
 
-    // Dialog click (debounced so mobile #btnA tap-lift cannot accidentally auto-dismiss)
-    $('dialog').addEventListener('click', () => closeDialog(false));
+    const dlg = $('dialog');
+    if (dlg) dlg.addEventListener('click', () => closeDialog(false));
 
-    // HUD Buttons
-    $('partnerCard').onclick = () => UI.openParty();
-    $('mapBtn').onclick = () => UI.openWorldMap();
-    $('dexBtn').onclick = () => UI.openDex();
-    $('bagBtn').onclick = () => UI.openBag();
-    $('shopBtn').onclick = () => UI.openStore('chapters');
-    $('menuBtn').onclick = () => UI.openSettings();
-    $('langBtn').onclick = () => { I18N.toggleLang(); refreshLabels(); };
-    $('muteBtn').onclick = () => { AudioFX.setMuted(!AudioFX.isMuted()); syncHud(); };
+    const bindClick = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };
+    bindClick('partnerCard', () => UI.openParty());
+    bindClick('mapBtn', () => UI.openWorldMap());
+    bindClick('dexBtn', () => UI.openDex());
+    bindClick('bagBtn', () => UI.openBag());
+    bindClick('shopBtn', () => UI.openStore('chapters'));
+    bindClick('menuBtn', () => UI.openSettings());
+    bindClick('langBtn', () => { I18N.toggleLang(); refreshLabels(); });
+    bindClick('bLangBtn', () => { I18N.toggleLang(); refreshLabels(); });
+    bindClick('muteBtn', () => { AudioFX.setMuted(!AudioFX.isMuted()); syncHud(); });
 
-    // Battle Action Buttons
-    $('bActions').querySelectorAll('[data-act]').forEach(btn => {
-      btn.onclick = () => Battle.handleAction(btn.dataset.act);
-    });
+    const bActions = $('bActions');
+    if (bActions) {
+      bActions.querySelectorAll('[data-act]').forEach(btn => {
+        btn.onclick = () => Battle.handleAction(btn.dataset.act);
+      });
+    }
   }
 
   function resetGame() {
@@ -889,6 +1257,35 @@ const Game = (() => {
     renderTitleScreen();
   }
 
-  window.addEventListener('DOMContentLoaded', init);
-  return { getState, warpToChapter };
+  if (typeof window !== 'undefined' && typeof document !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('DOMContentLoaded', init);
+  }
+
+  return {
+    init,
+    startGame,
+    defaultState,
+    sanitizeSave,
+    getState,
+    getPlayerPos,
+    getOverworldPos,
+    warpToChapter,
+    startBattle,
+    syncPartyStats,
+    recordAdProgress,
+    grantProduct,
+    buyHeroWithGold,
+    buyToolWithGold,
+    buySupplyWithGold,
+    equipHero,
+    saveAndSync,
+    refreshLabels,
+    interact,
+    tryStep,
+    showDialog,
+    closeDialog,
+    resetGame,
+  };
 })();
+if (typeof globalThis !== 'undefined') globalThis.Game = Game;
+if (typeof module === 'object' && module.exports) module.exports = Game;
