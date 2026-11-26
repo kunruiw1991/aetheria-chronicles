@@ -8,6 +8,7 @@
       { "type": "folder", "value": ".qa" },
       { "type": "folder", "value": ".github" },
       { "type": "folder", "value": "css" },
+      { "type": "folder", "value": "assets" },
       { "type": "file", "value": "index.html" },
       { "type": "file", "value": "README.md" },
       { "type": "file", "value": "QA_REVIEW_REQUEST.md" },
