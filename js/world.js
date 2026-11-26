@@ -660,4 +660,5 @@ const World = (() => {
     getT, getZ, inb, hasObjAt, hasNpcAt, hasChestAt, isWalkable, audit,
   };
 })();
+if (typeof globalThis !== 'undefined') globalThis.World = World;
 if (typeof module === 'object' && module.exports) module.exports = World;

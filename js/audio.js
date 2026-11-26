@@ -1,7 +1,8 @@
 'use strict';
 /* ==========================================================================
  * audio.js — Procedural Web Audio Fantasy Synth BGM & SFX
- * Lightweight (zero MP3 downloads — ideal for WeChat Mini Game 4MB limit).
+ * Supports WeChat Mini Game (wx.createWebAudioContext) and Browser AudioContext
+ * with zero external MP3 downloads and zero window/DOM hard dependencies.
  * ========================================================================== */
 const AudioFX = (() => {
   let ctx = null;
@@ -20,32 +21,45 @@ const AudioFX = (() => {
     dungeon:   { tempo: 260, wave: 'triangle', notes: [330, 392, 494, 440, 392, 330, 294, 330, 392, 440, 523, 494, 440, 392, 330, 0] },
   };
 
+  function createAudioContext() {
+    try {
+      if (typeof wx !== 'undefined' && wx && typeof wx.createWebAudioContext === 'function') {
+        return wx.createWebAudioContext();
+      }
+      const root = typeof globalThis !== 'undefined' ? globalThis : (typeof window !== 'undefined' ? window : {});
+      const AC = root.AudioContext || root.webkitAudioContext;
+      if (typeof AC === 'function') return new AC();
+    } catch (_) {}
+    return null;
+  }
+
   function ensure() {
     if (muted) return null;
-    if (!ctx) {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return null;
-      ctx = new AC();
+    if (!ctx) ctx = createAudioContext();
+    if (!ctx) return null;
+    if (ctx.state === 'suspended' && typeof ctx.resume === 'function') {
+      try { Promise.resolve(ctx.resume()).catch(() => {}); } catch (_) {}
     }
-    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
     return ctx;
   }
 
   function tone(freq, dur, type, vol, delay) {
     const c = ensure();
-    if (!c || !freq) return;
-    const t0 = c.currentTime + (delay || 0);
-    const osc = c.createOscillator();
-    const gain = c.createGain();
-    osc.type = type || 'triangle';
-    osc.frequency.setValueAtTime(freq, t0);
-    gain.gain.setValueAtTime(0.0001, t0);
-    gain.gain.linearRampToValueAtTime(vol || 0.08, t0 + 0.015);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-    osc.connect(gain);
-    gain.connect(c.destination);
-    osc.start(t0);
-    osc.stop(t0 + dur + 0.02);
+    if (!c || !freq || typeof c.createOscillator !== 'function' || typeof c.createGain !== 'function') return;
+    try {
+      const t0 = (c.currentTime || 0) + (delay || 0);
+      const osc = c.createOscillator();
+      const gain = c.createGain();
+      osc.type = type || 'triangle';
+      osc.frequency.setValueAtTime(freq, t0);
+      gain.gain.setValueAtTime(0.0001, t0);
+      gain.gain.linearRampToValueAtTime(vol || 0.08, t0 + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      osc.connect(gain);
+      gain.connect(c.destination);
+      osc.start(t0);
+      osc.stop(t0 + dur + 0.02);
+    } catch (_) {}
   }
 
   function playBgm(trackName) {
@@ -56,7 +70,7 @@ const AudioFX = (() => {
     if (!tr) return;
     stepIdx = 0;
     bgmTimer = setInterval(() => {
-      if (muted || !ctx || ctx.state !== 'running') return;
+      if (muted || !ctx || (ctx.state && ctx.state !== 'running')) return;
       const n = tr.notes[stepIdx % tr.notes.length];
       stepIdx++;
       if (n > 0) tone(n, tr.tempo / 1000 * 0.85, tr.wave, tr.wave === 'square' ? 0.028 : 0.042, 0);
@@ -76,6 +90,10 @@ const AudioFX = (() => {
   function init() {
     muted = Platform.loadSetting('muted') === '1';
   }
+  function _resetContextForTest() {
+    stopBgm();
+    ctx = null;
+  }
 
   const sfx = {
     step()    { tone(180 + Math.random() * 40, 0.04, 'triangle', 0.025); },
@@ -93,6 +111,7 @@ const AudioFX = (() => {
     levelUp() { [523, 659, 784, 1046, 784, 1046].forEach((f, i) => tone(f, 0.16, 'square', 0.06, i * 0.08)); },
   };
 
-  return { init, ensure, playBgm, stopBgm, setMuted, isMuted, sfx };
+  return { init, ensure, playBgm, stopBgm, setMuted, isMuted, sfx, _resetContextForTest };
 })();
+if (typeof globalThis !== 'undefined') globalThis.AudioFX = AudioFX;
 if (typeof module === 'object' && module.exports) module.exports = AudioFX;
