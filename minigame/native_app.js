@@ -26,6 +26,8 @@ const NativeApp = (() => {
   let vw = 390;
   let vh = 844;
   let dpr = 1;
+  let safeTop = 56;
+  let safeBottom = 16;
   let mapCanvas = null;
 
   let booted = false;
@@ -571,8 +573,8 @@ const NativeApp = (() => {
     const pad = 16;
     const cardW = Math.min(vw - pad * 2, 420);
     const cardX = (vw - cardW) / 2;
-    const cardY = Math.max(40, vh * 0.1);
-    const cardH = Math.min(vh - cardY - 24, 540);
+    const cardY = Math.max(safeTop + 6, vh * 0.12);
+    const cardH = Math.min(vh - cardY - safeBottom - 16, 540);
     ctx.fillStyle = '#fcf9f0';
     roundRect(ctx, cardX, cardY, cardW, cardH, 20);
     ctx.fill();
@@ -670,8 +672,8 @@ const NativeApp = (() => {
     const isSurfing = World.getT(m, Math.round(player.x), Math.round(player.y)) === World.T.SHALLOW;
     Art.drawHero(ctx, state.heroId, player.x * S - camX, player.y * S - camY, S, player.dir, player.walkPhase, time, state.tools, isSurfing);
 
-    // Top HUD
-    const topY = 12;
+    // Top HUD — strictly below status bar & WeChat native capsule button
+    const topY = safeTop;
     const p = getActiveMine();
     const cr = D.CRITTER_BY_ID[p.id];
     ctx.fillStyle = 'rgba(252,249,240,0.95)';
@@ -703,12 +705,20 @@ const NativeApp = (() => {
     ctx.textAlign = 'center';
     ctx.fillText(bannerTxt, vw / 2, topY + 67, 206);
 
-    // Bottom Controls (D-Pad + 2x2 Menu + A/B)
-    const botY = vh - 96;
+    // Bottom Controls (D-Pad + 2x2 Menu + A/B) above Home Indicator safe area
+    const botY = vh - safeBottom - 96;
     dpadRect = { cx: 52, cy: botY + 42, r: 42 };
-    ctx.fillStyle = 'rgba(15,23,42,0.55)';
+    ctx.fillStyle = 'rgba(15,23,42,0.58)';
     ctx.beginPath(); ctx.arc(dpadRect.cx, dpadRect.cy, dpadRect.r, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.88)';
+    ctx.font = 'bold 13px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('▲', dpadRect.cx, dpadRect.cy - 26);
+    ctx.fillText('▼', dpadRect.cx, dpadRect.cy + 26);
+    ctx.fillText('◄', dpadRect.cx - 26, dpadRect.cy);
+    ctx.fillText('►', dpadRect.cx + 26, dpadRect.cy);
 
     const menuX = 102;
     const menuW = Math.max(120, vw - 208);
@@ -723,7 +733,7 @@ const NativeApp = (() => {
 
     // Dialog Box
     if (dialog) {
-      const dx = 12, dy = vh - 190, dw = vw - 24, dh = 84;
+      const dx = 12, dy = botY - 94, dw = vw - 24, dh = 84;
       ctx.fillStyle = '#fcf9f0';
       roundRect(ctx, dx, dy, dw, dh, 14);
       ctx.fill();
@@ -741,7 +751,7 @@ const NativeApp = (() => {
 
   function renderBattle() {
     if (!bState) return;
-    const stageH = Math.floor(vh * 0.58);
+    const stageH = Math.floor(vh * 0.56);
     ctx.fillStyle = '#1e293b';
     ctx.fillRect(0, 0, vw, vh);
     const g = ctx.createLinearGradient(0, 0, 0, stageH);
@@ -753,16 +763,17 @@ const NativeApp = (() => {
     const wCr = D.CRITTER_BY_ID[bState.wild.id];
     const mine = getActiveMine();
     const mCr = D.CRITTER_BY_ID[mine.id];
-    Art.drawCritter(ctx, bState.wild.id, vw * 0.72, stageH * 0.42, 110, time, false);
+    Art.drawCritter(ctx, bState.wild.id, vw * 0.72, Math.max(safeTop + 78, stageH * 0.45), 110, time, false);
     Art.drawCritter(ctx, mine.id, vw * 0.28, stageH * 0.74, 108, time + 1, true);
 
-    // Wild & Mine Cards
+    // Wild & Mine Cards (Wild card below safeTop)
+    const wildY = safeTop;
     ctx.fillStyle = 'rgba(255,255,255,0.92)';
-    roundRect(ctx, 12, 16, 176, 56, 12); ctx.fill();
+    roundRect(ctx, 12, wildY, 176, 56, 12); ctx.fill();
     ctx.fillStyle = '#0f172a'; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'left';
-    ctx.fillText(`${I18N.pick(wCr.name)} Lv.${bState.wild.lv}`, 22, 36, 156);
+    ctx.fillText(`${I18N.pick(wCr.name)} Lv.${bState.wild.lv}`, 22, wildY + 20, 156);
     ctx.fillStyle = '#475569'; ctx.font = '12px sans-serif';
-    ctx.fillText(`HP ${bState.wild.hp}/${bState.wild.maxHp}`, 22, 56);
+    ctx.fillText(`HP ${bState.wild.hp}/${bState.wild.maxHp}`, 22, wildY + 40);
 
     ctx.fillStyle = 'rgba(255,255,255,0.92)';
     roundRect(ctx, vw - 188, stageH - 70, 176, 56, 12); ctx.fill();
@@ -807,7 +818,7 @@ const NativeApp = (() => {
     ctx.fillStyle = 'rgba(15,23,42,0.72)';
     ctx.fillRect(0, 0, vw, vh);
 
-    const mx = 12, my = 32, mw = vw - 24, mh = vh - 64;
+    const mx = 12, my = safeTop, mw = vw - 24, mh = vh - safeTop - safeBottom - 12;
     ctx.fillStyle = '#fcf9f0';
     roundRect(ctx, mx, my, mw, mh, 18);
     ctx.fill();
@@ -925,7 +936,7 @@ const NativeApp = (() => {
     const tNow = nowMs();
     toasts = toasts.filter(t => t.expiresAt > tNow);
     toasts.forEach((t, i) => {
-      const ty = 104 + i * 36;
+      const ty = safeTop + 88 + i * 36;
       ctx.fillStyle = 'rgba(15,23,42,0.92)';
       roundRect(ctx, 20, ty, vw - 40, 30, 10);
       ctx.fill();
@@ -1016,6 +1027,20 @@ const NativeApp = (() => {
     vw = (info && info.windowWidth) || 390;
     vh = (info && info.windowHeight) || 844;
     dpr = Math.min(2, (info && info.pixelRatio) || 1);
+    let menuRect = null;
+    try {
+      if (typeof wx.getMenuButtonBoundingClientRect === 'function') {
+        menuRect = wx.getMenuButtonBoundingClientRect();
+      }
+    } catch (_) {}
+    const statusBarH = (info && info.statusBarHeight) || 24;
+    safeTop = Math.max(
+      statusBarH + 40,
+      menuRect && menuRect.bottom ? menuRect.bottom + 8 : statusBarH + 44
+    );
+    safeBottom = (info && info.safeArea && typeof info.safeArea.bottom === 'number')
+      ? Math.max(10, vh - info.safeArea.bottom + 6)
+      : 16;
 
     canvas = wx.createCanvas();
     canvas.width = Math.round(vw * dpr);
